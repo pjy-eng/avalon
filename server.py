@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 import json
 import string
 import random
+import urllib.request
+import urllib.error
 from typing import Any, Dict, List, Optional, Set
 
 try:
@@ -32,6 +34,17 @@ CLIENT_TIMEOUT = 15
 ROOM_TTL_SECONDS = 300
 ROOM_PERSIST_TTL_SECONDS = 60 * 60 * 6
 WS_SEND_TIMEOUT = 3
+REDIS_SAVE_RETRIES = 2
+REDIS_OPERATION_TIMEOUT = 8
+CRITICAL_PERSIST_EVENTS = {
+    "toggle_ready", "start_game", "select_team", "speaker_finished",
+    "finish_free_discussion", "team_vote", "mission_vote", "continue_after_result",
+    "assassin_target", "kick_player", "reset_room"
+}
+
+
+class RedisPersistenceError(RuntimeError):
+    pass
 
 
 @dataclass
@@ -174,7 +187,45 @@ class Room:
 rooms: Dict[str, Room] = {}
 redis_client = None
 
-app = FastAPI(title="Avalon Online AI Judge", version="14.0.0-castle-deal")
+
+def redis_rest_configured() -> bool:
+    return bool(os.getenv("UPSTASH_REDIS_REST_URL") and os.getenv("UPSTASH_REDIS_REST_TOKEN"))
+
+
+def make_redis_client():
+    redis_url = os.getenv("REDIS_URL")
+    if not (redis and redis_url):
+        return None
+    return redis.from_url(
+        redis_url,
+        decode_responses=True,
+        socket_timeout=REDIS_OPERATION_TIMEOUT,
+        socket_connect_timeout=REDIS_OPERATION_TIMEOUT,
+        health_check_interval=30,
+        socket_keepalive=True,
+        retry_on_timeout=True,
+    )
+
+
+async def get_redis_client():
+    global redis_client
+    if redis_client is None:
+        redis_client = make_redis_client()
+    return redis_client
+
+
+async def reset_redis_client():
+    global redis_client
+    if redis_client is not None:
+        try:
+            await redis_client.aclose()
+        except Exception:
+            pass
+    redis_client = make_redis_client()
+    return redis_client
+
+
+app = FastAPI(title="Avalon Online AI Judge", version="15.2.0-strict-recovery")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -200,15 +251,30 @@ async def head_index() -> Dict[str, Any]:
 @app.on_event("startup")
 async def startup_tasks() -> None:
     global redis_client
-    redis_url = os.getenv("REDIS_URL")
-    if redis and redis_url:
-        redis_client = redis.from_url(redis_url, decode_responses=True)
+    redis_client = make_redis_client()
+    # Do not fail local development if Redis is unavailable, but test the connection early
+    # so Render logs show configuration problems before a game starts.
+    if redis_rest_configured():
+        try:
+            await redis_rest_command(["PING"])
+            print("[redis] Upstash REST persistence ready")
+        except Exception as exc:
+            print(f"[redis] REST ping failed: {exc}")
+    elif redis_client is not None:
+        try:
+            await redis_client.ping()
+            print("[redis] TCP persistence ready")
+        except Exception as exc:
+            print(f"[redis] TCP ping failed: {exc}")
+            await reset_redis_client()
+    else:
+        print("[redis] persistence not configured; local memory mode only")
     asyncio.create_task(room_cleanup_loop())
 
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    return {"ok": True, "rooms": len(rooms), "livekit_configured": livekit_configured(), "redis_configured": bool(redis_client)}
+    return {"ok": True, "rooms": len(rooms), "livekit_configured": livekit_configured(), "redis_configured": bool(redis_client) or redis_rest_configured()}
 
 
 @app.head("/health")
@@ -236,6 +302,8 @@ async def livekit_token(
     room_key = normalize_room(room_id)
     pid = sanitize_id(player_id)
     room = await get_room(room_key, create=False)
+    if room is None and persistence_configured():
+        raise HTTPException(status_code=503, detail="房间恢复服务暂时不可用，语音 token 暂停签发。")
     if not room or pid not in room.players:
         raise HTTPException(status_code=403, detail="玩家尚未加入该房间，不能签发语音 token。")
 
@@ -291,6 +359,10 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str) -> None:
     await websocket.accept()
     room_id = normalize_room(room_id)
     room = await get_room(room_id, create=True)
+    if room is None:
+        await websocket.send_json({"type": "error", "message": "房间恢复服务暂时不可用，请稍后重试。为避免丢局，系统没有创建新房间。"})
+        await websocket.close()
+        return
     player_id: Optional[str] = None
     try:
         join_raw = await websocket.receive_text()
@@ -334,6 +406,9 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str) -> None:
             room.last_seen[player_id] = time.time()
             room.disconnected_at.pop(player_id, None)
             room.expire_at = None
+        join_saved = await save_room(room, strict=True)
+        if not join_saved:
+            await websocket.send_json({"type": "error", "message": "房间状态保存失败，暂时无法稳定加入。请稍后重试。"})
         await broadcast_state(room)
 
         while True:
@@ -379,6 +454,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str) -> None:
 async def handle_message(room: Room, player_id: str, msg: Dict[str, Any]) -> None:
     msg_type = msg.get("type")
     kicked_ws: Optional[WebSocket] = None
+
     if msg_type in {"ping", "client_pong"}:
         room.last_seen[player_id] = time.time()
         ws = room.sockets.get(player_id)
@@ -388,7 +464,17 @@ async def handle_message(room: Room, player_id: str, msg: Dict[str, Any]) -> Non
             except Exception:
                 pass
         return
+
+    if msg_type in {"rtc_offer", "rtc_answer", "rtc_ice"}:
+        await forward_rtc(room, player_id, msg)
+        return
+
+    strict_persist = msg_type in CRITICAL_PERSIST_EVENTS
+    rollback_data: Optional[Dict[str, Any]] = None
+    operation_error: Optional[str] = None
+
     async with room.lock:
+        rollback_data = serialize_room(room)
         try:
             if msg_type == "toggle_ready":
                 if room.game:
@@ -401,6 +487,7 @@ async def handle_message(room: Room, player_id: str, msg: Dict[str, Any]) -> Non
                 else:
                     room.ready_ids.add(player_id)
                     add_system_chat(room, f"{room.players[player_id].seat}号-{room.players[player_id].name} 已准备。")
+
             elif msg_type == "start_game":
                 require_host(room, player_id)
                 count = len(room.players)
@@ -416,48 +503,55 @@ async def handle_message(room: Room, player_id: str, msg: Dict[str, Any]) -> Non
                 room.game = AvalonGame(player_order=player_order, player_names=room.player_names())
                 room.game.start()
                 add_system_chat(room, "身份已私密分发，游戏开始。")
+
             elif msg_type == "select_team":
                 require_game(room)
                 team = msg.get("team") or []
                 room.game.select_team(player_id, team)
+
             elif msg_type == "speaker_finished":
                 require_game(room)
                 force = bool(msg.get("force")) and player_id == room.game.leader_id
                 room.game.speaker_finished(player_id, force=force)
+
             elif msg_type == "finish_free_discussion":
                 require_game(room)
                 require_leader(room, player_id)
                 room.game.finish_free_discussion()
+
             elif msg_type == "team_vote":
                 require_game(room)
                 room.game.submit_team_vote(player_id, msg.get("vote"))
+
             elif msg_type == "mission_vote":
                 require_game(room)
                 room.game.submit_mission_vote(player_id, msg.get("vote"))
+
             elif msg_type == "continue_after_result":
                 require_game(room)
                 require_leader(room, player_id)
                 room.game.continue_after_mission_result()
+
             elif msg_type == "assassin_target":
                 require_game(room)
                 room.game.submit_assassin_target(player_id, msg.get("target"))
+
             elif msg_type == "chat":
                 handle_chat(room, player_id, msg.get("text") or "")
-            elif msg_type == "ping":
-                pass
+
             elif msg_type == "speaking_state":
                 if bool(msg.get("speaking")):
                     room.speaking_ids.add(player_id)
                 else:
                     room.speaking_ids.discard(player_id)
+
             elif msg_type == "voice_ready":
-                # 某个玩家刚打开语音/仅扬声器，广播状态让已在线玩家立即补建 WebRTC 连接。
+                # Voice state is intentionally not persisted; LiveKit reconnects separately.
                 pass
+
             elif msg_type == "kick_player":
                 kicked_ws = kick_player(room, player_id, sanitize_id(msg.get("target") or ""))
-            elif msg_type in {"rtc_offer", "rtc_answer", "rtc_ice"}:
-                # Signaling is forwarded outside the lock after this block.
-                pass
+
             elif msg_type == "reset_room":
                 require_host(room, player_id)
                 room.game = None
@@ -466,22 +560,38 @@ async def handle_message(room: Room, player_id: str, msg: Dict[str, Any]) -> Non
                 room.ready_ids.clear()
                 room.speaking_ids.clear()
                 add_system_chat(room, "房间已重置，玩家可以重新开局。")
+
             else:
                 raise ValueError("未知事件类型。")
+
+            if strict_persist:
+                saved = await save_room(room, strict=True)
+                if not saved:
+                    restore_room_from_data(room, rollback_data)
+                    operation_error = "房间状态保存失败，本次操作未生效。请稍后重试，避免一局游戏丢失。"
+
         except Exception as exc:
+            if rollback_data and strict_persist:
+                restore_room_from_data(room, rollback_data)
+            operation_error = str(exc)
             if room.game:
                 room.game.set_error(str(exc))
             else:
                 add_system_chat(room, f"⚠️ {exc}")
-    if kicked_ws:
+
+    if operation_error:
+        ws = room.sockets.get(player_id)
+        if ws:
+            with contextlib.suppress(Exception):
+                await ws.send_json({"type": "error", "message": operation_error})
+
+    if kicked_ws and not operation_error:
         try:
             await kicked_ws.send_json({"type": "kicked", "message": "你已被房主移出圆桌。"})
             await kicked_ws.close()
         except Exception:
             pass
-    if msg_type in {"rtc_offer", "rtc_answer", "rtc_ice"}:
-        await forward_rtc(room, player_id, msg)
-        return
+
     await broadcast_state(room)
 
 
@@ -546,7 +656,7 @@ async def safe_send_json(ws: WebSocket, payload: Dict[str, Any]) -> bool:
 
 
 async def broadcast_state(room: Room) -> None:
-    await save_room(room)
+    await save_room(room, strict=False)
     dead: List[str] = []
     for pid, ws in list(room.sockets.items()):
         ok = await safe_send_json(ws, room.snapshot_for(pid))
@@ -562,7 +672,7 @@ async def broadcast_state(room: Room) -> None:
                     room.disconnected_at[pid] = time.time()
             if not room.sockets:
                 room.expire_at = time.time() + ROOM_TTL_SECONDS
-        await save_room(room)
+        await save_room(room, strict=False)
 
 
 async def forward_rtc(room: Room, sender_id: str, msg: Dict[str, Any]) -> None:
@@ -618,40 +728,143 @@ def deserialize_room(data: Dict[str, Any]) -> Room:
     return room
 
 
+def restore_room_from_data(room: Room, data: Dict[str, Any]) -> None:
+    """Rollback room state while preserving live socket/lock fields."""
+    restored = deserialize_room(data)
+    live_sockets = room.sockets
+    live_last_seen = room.last_seen
+    live_disconnected_at = room.disconnected_at
+    live_expire_at = room.expire_at
+    live_speaking = set(room.speaking_ids)
+
+    room.host_id = restored.host_id
+    room.players = restored.players
+    room.game = restored.game
+    room.chat_history = restored.chat_history
+    room.ready_ids = restored.ready_ids
+    room.game_seq = restored.game_seq
+
+    room.sockets = live_sockets
+    room.last_seen = live_last_seen
+    room.disconnected_at = live_disconnected_at
+    room.expire_at = live_expire_at
+    room.speaking_ids = live_speaking.intersection(room.players.keys())
+
+
+def persistence_configured() -> bool:
+    return bool(redis_rest_configured() or os.getenv("REDIS_URL"))
+
+
+def _redis_rest_command_sync(command: List[Any]) -> Any:
+    url = (os.getenv("UPSTASH_REDIS_REST_URL") or "").rstrip("/")
+    token = os.getenv("UPSTASH_REDIS_REST_TOKEN") or ""
+    if not url or not token:
+        raise RuntimeError("Upstash REST is not configured")
+    body = json.dumps(command, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=REDIS_OPERATION_TIMEOUT) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    if isinstance(payload, dict) and payload.get("error"):
+        raise RuntimeError(payload["error"])
+    return payload.get("result") if isinstance(payload, dict) else payload
+
+
+async def redis_rest_command(command: List[Any]) -> Any:
+    return await asyncio.to_thread(_redis_rest_command_sync, command)
+
+
+
 async def load_room_from_redis(room_id: str) -> Optional[Room]:
-    if not redis_client:
+    key = redis_key(room_id)
+    raw: Optional[str] = None
+    had_error = False
+
+    if redis_rest_configured():
+        try:
+            raw = await redis_rest_command(["GET", key])
+        except Exception as exc:
+            had_error = True
+            print(f"[redis] REST load room {room_id} failed: {exc}")
+
+    if raw is None:
+        client = await get_redis_client()
+        if client:
+            for attempt in range(REDIS_SAVE_RETRIES + 1):
+                try:
+                    raw = await client.get(key)
+                    break
+                except Exception as exc:
+                    had_error = True
+                    print(f"[redis] TCP load room {room_id} failed attempt {attempt + 1}: {exc}")
+                    client = await reset_redis_client()
+
+    # Important: when Redis is configured but unreachable, do NOT create a fresh empty room.
+    # Otherwise Render restart + temporary Redis failure can overwrite/lose an active game.
+    if raw is None and had_error and persistence_configured():
+        raise RedisPersistenceError(f"无法从 Redis 恢复房间 {room_id}")
+
+    if not raw:
         return None
+
     try:
-        raw = await redis_client.get(redis_key(room_id))
-        if not raw:
-            return None
         data = json.loads(raw)
         room = deserialize_room(data)
         rooms[room_id] = room
         return room
     except Exception as exc:
-        print(f"[redis] load room {room_id} failed: {exc}")
-        return None
+        print(f"[redis] deserialize room {room_id} failed: {exc}")
+        raise RedisPersistenceError(f"房间 {room_id} 的 Redis 数据损坏或无法反序列化")
 
 
-async def save_room(room: Room) -> None:
-    if not redis_client:
-        return
-    try:
-        await redis_client.setex(
-            redis_key(room.room_id),
-            ROOM_PERSIST_TTL_SECONDS,
-            json.dumps(serialize_room(room), ensure_ascii=False),
-        )
-    except Exception as exc:
-        print(f"[redis] save room {room.room_id} failed: {exc}")
+async def save_room(room: Room, *, strict: bool = False) -> bool:
+    """Persist a room. If strict=True and persistence is configured, failure means the action must not advance."""
+    if not persistence_configured():
+        return True  # local development mode
+
+    key = redis_key(room.room_id)
+    payload = json.dumps(serialize_room(room), ensure_ascii=False)
+
+    if redis_rest_configured():
+        for attempt in range(REDIS_SAVE_RETRIES + 1):
+            try:
+                await redis_rest_command(["SETEX", key, ROOM_PERSIST_TTL_SECONDS, payload])
+                return True
+            except Exception as exc:
+                print(f"[redis] REST save room {room.room_id} failed attempt {attempt + 1}: {exc}")
+
+    client = await get_redis_client()
+    if client:
+        for attempt in range(REDIS_SAVE_RETRIES + 1):
+            try:
+                await client.setex(key, ROOM_PERSIST_TTL_SECONDS, payload)
+                return True
+            except Exception as exc:
+                print(f"[redis] TCP save room {room.room_id} failed attempt {attempt + 1}: {exc}")
+                client = await reset_redis_client()
+
+    if strict:
+        print(f"[redis] STRICT save room {room.room_id} failed; operation rolled back")
+    return False
 
 
 async def delete_room_from_redis(room_id: str) -> None:
-    if not redis_client:
-        return
-    with contextlib.suppress(Exception):
-        await redis_client.delete(redis_key(room_id))
+    key = redis_key(room_id)
+    if redis_rest_configured():
+        with contextlib.suppress(Exception):
+            await redis_rest_command(["DEL", key])
+            return
+    client = await get_redis_client()
+    if client:
+        with contextlib.suppress(Exception):
+            await client.delete(key)
 
 
 async def get_room(room_id: str, create: bool = False) -> Optional[Room]:
@@ -659,7 +872,13 @@ async def get_room(room_id: str, create: bool = False) -> Optional[Room]:
     room = rooms.get(room_id)
     if room:
         return room
-    room = await load_room_from_redis(room_id)
+
+    try:
+        room = await load_room_from_redis(room_id)
+    except RedisPersistenceError as exc:
+        print(f"[redis] get room {room_id} blocked: {exc}")
+        return None
+
     if room:
         return room
     if create:
