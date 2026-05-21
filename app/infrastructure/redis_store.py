@@ -12,7 +12,6 @@ class InMemoryTTLStore:
     def set_once(self, key: str, value: str, ttl_seconds: float) -> bool:
         self._cleanup_key(key)
         if ttl_seconds <= 0:
-            self.delete(key)
             return False
         if key in self._values:
             return False

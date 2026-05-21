@@ -50,7 +50,7 @@ class RoomRecord(Base):
 class ParticipantRecord(Base):
     __tablename__ = "room_participants"
 
-    participant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    participant_id: Mapped[str] = mapped_column(String(160), primary_key=True)
     room_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     player_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     nickname: Mapped[str] = mapped_column(String(128), nullable=False)
