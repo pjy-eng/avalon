@@ -1028,6 +1028,7 @@ function showDealOverlay(options = {}) {
   roleCardFlipped = !!options.flipped;
   overlay.classList.remove("hidden");
   buildFlyingCards();
+  scheduleFlyingCardCleanup();
   renderDealIdentityCard();
   // v14.2: no countdown. The card stays covered until the player chooses to flip it.
   dealOverlayStart = Date.now();
@@ -1054,6 +1055,7 @@ function setDealCardFlipped(flipped) {
   roleCardFlipped = !!flipped;
   renderDealIdentityCard();
   card?.classList.toggle("flipped", roleCardFlipped);
+  if (roleCardFlipped) cleanupDealTrailCards(true);
 }
 
 function renderDealIdentityCard() {
@@ -1107,6 +1109,35 @@ function buildFlyingCards() {
     card.style.animationDelay = `${i * 70}ms`;
     wrap.appendChild(card);
   }
+}
+
+
+function scheduleFlyingCardCleanup() {
+  clearTimeout(window.__dealTrailCleanupTimer);
+  window.__dealTrailCleanupTimer = setTimeout(() => cleanupDealTrailCards(), 1050);
+}
+
+function cleanupDealTrailCards(immediate = false) {
+  const wrap = $("flyingCards");
+  if (!wrap) return;
+  wrap.classList.add("is-clearing");
+  const cards = Array.from(wrap.querySelectorAll(".fly-card"));
+  if (!cards.length) return;
+  if (immediate) {
+    wrap.innerHTML = "";
+    wrap.classList.remove("is-clearing");
+    return;
+  }
+  cards.forEach((card, index) => {
+    setTimeout(() => {
+      card.classList.add("is-fading-out");
+      card.addEventListener("transitionend", () => card.remove(), { once: true });
+    }, index * 35);
+  });
+  setTimeout(() => {
+    wrap.innerHTML = "";
+    wrap.classList.remove("is-clearing");
+  }, 700 + cards.length * 35);
 }
 
 function sendChat() {

@@ -1569,3 +1569,168 @@ body {
   .btn-danger.armed { animation: none; }
   .deal-flip-inner { transition: none; }
 }
+
+
+/* v17.2: deal overlay cleanup + readable identity card + mission badge green */
+.flying-cards {
+  transition: opacity .28s ease, transform .28s ease;
+}
+.flying-cards.is-clearing {
+  pointer-events: none;
+}
+.fly-card {
+  transition: opacity .32s ease, transform .32s ease, filter .32s ease;
+}
+.fly-card.is-fading-out {
+  opacity: 0 !important;
+  filter: blur(2px);
+  transform: translate(-50%, -50%) translate(var(--tx,0), var(--ty,0)) rotate(var(--rot,0)) scale(.82) !important;
+}
+.identity-flip-card.flipped ~ .flying-cards,
+.identity-flip-card.flipped + .flying-cards {
+  opacity: 0;
+}
+
+/* Keep the overlay focused on the single identity card after dealing. */
+.deal-stage {
+  max-width: min(92vw, 420px);
+  gap: clamp(14px, 2.5vh, 22px);
+}
+.identity-flip-card {
+  width: clamp(240px, 56vw, 310px);
+  height: clamp(360px, 62vh, 460px);
+  max-height: calc(100dvh - 180px);
+}
+.deal-face {
+  overflow: hidden;
+}
+.deal-face-back {
+  padding: clamp(10px, 2.3vw, 16px);
+}
+.deal-role-card {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  align-items: start;
+  justify-items: center;
+  gap: 6px;
+  padding: clamp(14px, 3vw, 18px) clamp(12px, 3vw, 16px);
+}
+.deal-role-emblem {
+  font-size: clamp(24px, 5vw, 34px);
+  margin: 0 0 2px;
+  line-height: 1;
+}
+.deal-role-name {
+  font-size: clamp(24px, 6vw, 36px);
+  line-height: 1.08;
+  margin: 0;
+}
+.deal-role-side {
+  margin: 2px 0 6px;
+  flex-shrink: 0;
+}
+.deal-role-scroll {
+  width: 100%;
+  min-height: 0;
+  height: 100%;
+  overflow-y: auto !important;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,.22) transparent;
+  padding: 0 4px 4px 0;
+  gap: 8px;
+}
+.deal-role-scroll div {
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255,255,255,.08);
+}
+.deal-role-scroll div:last-child {
+  border-bottom: 0;
+}
+.deal-role-scroll b {
+  display: block;
+  font-size: clamp(10px, 2.4vw, 12px);
+  margin-bottom: 3px;
+}
+.deal-role-scroll span {
+  display: block;
+  font-size: clamp(12px, 3.2vw, 14px);
+  line-height: 1.45;
+}
+.deal-actions,
+.deal-actions-single {
+  width: min(84vw, 320px);
+  max-width: 320px;
+}
+.btn-confirm {
+  min-height: 54px;
+  font-size: clamp(16px, 4vw, 20px);
+}
+
+/* Mission / expedition state uses green so it no longer conflicts with host/captain gold. */
+.tag.team,
+.seat-tag--team,
+.player-badge--team,
+.player-badge--mission,
+.badge-mission,
+.team-badge,
+.expedition-badge {
+  background: rgba(34, 197, 94, .16) !important;
+  color: #86efac !important;
+  border-color: rgba(34, 197, 94, .42) !important;
+  box-shadow: 0 0 10px rgba(34, 197, 94, .12);
+}
+.team-chip {
+  background: rgba(34, 197, 94, .13) !important;
+  color: #bbf7d0 !important;
+  border-color: rgba(34, 197, 94, .36) !important;
+}
+
+@media (max-width: 520px) {
+  .deal-overlay {
+    align-items: center;
+    padding: max(14px, env(safe-area-inset-top)) 14px max(16px, env(safe-area-inset-bottom));
+  }
+  .deal-title {
+    font-size: clamp(18px, 6vw, 24px);
+  }
+  .flying-cards {
+    height: 34px;
+  }
+  .identity-flip-card {
+    width: min(76vw, 286px);
+    height: min(58vh, 430px);
+    min-height: 350px;
+  }
+  .deal-role-card {
+    padding: 14px 12px;
+  }
+}
+
+@media (max-height: 700px) {
+  .deal-stage {
+    gap: 10px;
+  }
+  .deal-title::before {
+    width: 22px;
+    height: 22px;
+    margin-bottom: 4px;
+  }
+  .flying-cards {
+    height: 26px;
+  }
+  .identity-flip-card {
+    height: min(54vh, 390px);
+    min-height: 320px;
+  }
+  .deal-role-scroll span {
+    font-size: 12px;
+    line-height: 1.38;
+  }
+  .btn-confirm {
+    min-height: 48px;
+  }
+}
