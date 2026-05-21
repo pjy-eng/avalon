@@ -16,3 +16,13 @@ def test_health_returns_config_status():
         "redis": "not_configured",
         "voice": "not_configured",
     }
+
+
+def test_create_app_serves_index_outside_repo_cwd(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(create_app())
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "Avalon Online v2" in response.text

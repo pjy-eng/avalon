@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse
 
 from app.config import Settings
+
+STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
 
 router = APIRouter()
 
@@ -20,7 +24,6 @@ async def health(request: Request) -> dict[str, str | bool]:
     }
 
 
-@router.get("/", response_class=HTMLResponse)
-async def index() -> str:
-    with open("static/index.html", "r", encoding="utf-8") as file:
-        return file.read()
+@router.get("/")
+async def index() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
