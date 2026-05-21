@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse
 
 from app.config import Settings
-
-STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
+from app.paths import STATIC_DIR
 
 router = APIRouter()
 

@@ -3,8 +3,9 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.api.http import STATIC_DIR, router as http_router
+from app.api.http import router as http_router
 from app.config import Settings, load_settings
+from app.paths import STATIC_DIR
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
