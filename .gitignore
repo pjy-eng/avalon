@@ -20,6 +20,7 @@ Thumbs.db
 *.pid
 .env
 .env.*
+.superpowers/
 
 # Build/deploy artifacts
 dist/
