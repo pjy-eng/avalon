@@ -62,6 +62,9 @@ const appState = {
   messages: [],
   lastPhase: null,
   dealShownFor: null,
+  selectedTeam: [],
+  pendingAssassinationTarget: "",
+  commandPending: null,
 };
 
 const phaseLabels = {
@@ -231,11 +234,15 @@ function connectWebSocket() {
       return;
     }
     if (payload.type === "state") {
+      if (snapshotAcknowledgesPendingCommand(payload.snapshot)) {
+        setCommandPending(null, false);
+      }
       appState.snapshot = payload.snapshot;
       renderSnapshot(payload.snapshot);
       return;
     }
     if (payload.type === "error") {
+      setCommandPending(null, false);
       showTopError(payload.message || "服务端返回错误。");
       renderActions(appState.snapshot);
       return;
@@ -245,9 +252,11 @@ function connectWebSocket() {
     }
   });
   socket.addEventListener("close", () => {
+    setCommandPending(null);
     addSystemMessage("实时连接已断开，刷新或重新进入房间可恢复。", true);
   });
   socket.addEventListener("error", () => {
+    setCommandPending(null);
     showTopError("实时连接异常。");
   });
 }
@@ -263,6 +272,9 @@ function leaveRoom() {
   appState.socket = null;
   appState.lastPhase = null;
   appState.dealShownFor = null;
+  appState.selectedTeam = [];
+  appState.pendingAssassinationTarget = "";
+  appState.commandPending = null;
   hideDealOverlay();
   closeModals();
   window.history.replaceState({}, "", "/");
@@ -271,11 +283,15 @@ function leaveRoom() {
 
 function renderSnapshot(snapshot) {
   if (!snapshot) return;
-  const phase = snapshot.phase_summary?.phase || "LOBBY";
+  const nextPhase = snapshot.phase_summary?.phase || "LOBBY";
+  const phaseChanged = Boolean(appState.lastPhase && appState.lastPhase !== nextPhase);
+  if (phaseChanged) {
+    closeActionModals();
+  }
   const players = normalizePlayers(snapshot);
 
   elements.roomCode.textContent = snapshot.room?.room_id || appState.roomId || "-";
-  elements.phaseTitle.textContent = phaseLabels[phase] || phase;
+  elements.phaseTitle.textContent = phaseLabels[nextPhase] || nextPhase;
   elements.playerCountText.textContent = `${players.length}/10`;
   renderScore(snapshot);
   renderSeats(players, snapshot);
@@ -285,10 +301,10 @@ function renderSnapshot(snapshot) {
   renderChat();
   updateHostControls(snapshot);
 
-  if (appState.lastPhase && appState.lastPhase !== phase) {
-    showPhaseToast(phaseLabels[phase] || phase);
+  if (phaseChanged) {
+    showPhaseToast(phaseLabels[nextPhase] || nextPhase);
   }
-  appState.lastPhase = phase;
+  appState.lastPhase = nextPhase;
   maybeShowDealOverlay(snapshot);
 }
 
@@ -393,9 +409,9 @@ function renderAnnouncement(snapshot, players) {
   } else if (currentPhase === "MISSION_VOTE") {
     text = `队伍通过，出征队员提交任务票：${team.join("、") || "暂无"}。`;
   } else if (currentPhase === "MISSION_RESULT_DISCUSSION") {
-    text = "任务结果已结算，需要进入下一轮。当前 v2 尚未接入继续下一轮命令。";
+    text = missionResultText(snapshot);
   } else if (currentPhase === "ASSASSINATION") {
-    text = "正义已完成三次任务，刺客需要选择梅林。当前 v2 尚未接入刺杀提交命令。";
+    text = "正义已完成三次任务，刺客需要选择梅林。";
   } else if (currentPhase === "GAME_OVER") {
     text = summary.winner ? `游戏结束，${winnerLabel(summary.winner)} 获胜。` : "游戏结束。";
   }
@@ -428,7 +444,7 @@ function renderActions(snapshot) {
     if (actionType === "select_team") {
       elements.actionArea.append(
         paragraph(`你是本轮队长，需要选择 ${snapshot.phase_summary?.required_team_size || "若干"} 名出征队员。`),
-        disabledButton("选择出征队伍（待接入）", "btn btn-gold", missingFeatureHints.select_team),
+        button("选择出征队伍", "btn btn-gold", openTeamModal),
       );
     } else {
       elements.actionArea.append(paragraph("等待队长选择出征队伍。"));
@@ -443,8 +459,8 @@ function renderActions(snapshot) {
       const row = document.createElement("div");
       row.className = "button-row";
       row.append(
-        disabledButton("赞成（待接入）", "btn btn-good", missingFeatureHints.team_vote),
-        disabledButton("反对（待接入）", "btn btn-bad", missingFeatureHints.team_vote),
+        button("赞成", "btn btn-good", () => sendCommand({type: "team_vote", vote: "Approve"})),
+        button("反对", "btn btn-bad", () => sendCommand({type: "team_vote", vote: "Reject"})),
       );
       elements.actionArea.append(row);
     } else {
@@ -457,13 +473,18 @@ function renderActions(snapshot) {
     elements.permissionText.textContent = actionType === "mission_vote" ? "你行动" : "等待队员";
     appendTeamSummary(snapshot);
     if (actionType === "mission_vote") {
-      const row = document.createElement("div");
-      row.className = "button-row";
-      row.append(
-        disabledButton("任务成功（待接入）", "btn btn-good", missingFeatureHints.mission_vote),
-        disabledButton("任务失败（待接入）", "btn btn-bad", missingFeatureHints.mission_vote),
-      );
-      elements.actionArea.append(row);
+      const success = button("任务成功", "btn btn-good", () => sendCommand({type: "mission_vote", vote: "Success"}));
+      if (snapshot.my_action?.can_submit_fail === false) {
+        elements.actionArea.append(success, paragraph("你的身份本轮只能提交任务成功。"));
+      } else {
+        const row = document.createElement("div");
+        row.className = "button-row";
+        row.append(
+          success,
+          button("任务失败", "btn btn-bad", () => sendCommand({type: "mission_vote", vote: "Fail"})),
+        );
+        elements.actionArea.append(row);
+      }
     } else {
       elements.actionArea.append(paragraph("等待出征队员秘密提交任务票。"));
     }
@@ -471,11 +492,13 @@ function renderActions(snapshot) {
     return;
   }
   if (currentPhase === "MISSION_RESULT_DISCUSSION") {
-    elements.permissionText.textContent = "待推进";
-    elements.actionArea.append(
-      paragraph("任务结果已结算，但 v2 尚未接入公开结果摘要和继续下一轮命令。"),
-      disabledButton("进入下一轮（待接入）", "btn btn-gold", missingFeatureHints.continue_after_result),
-    );
+    elements.permissionText.textContent = snapshot.you?.is_host ? "房主推进" : "等待房主";
+    elements.actionArea.append(paragraph(missionResultText(snapshot)));
+    if (snapshot.you?.is_host) {
+      elements.actionArea.append(button("进入下一轮", "btn btn-gold", () => sendCommand({type: "continue_after_result"})));
+    } else {
+      elements.actionArea.append(paragraph("等待房主确认结果后进入下一轮。"));
+    }
     appendHostReset(snapshot);
     return;
   }
@@ -484,7 +507,7 @@ function renderActions(snapshot) {
     if (actionType === "assassinate") {
       elements.actionArea.append(
         paragraph("你是刺客，需要选择梅林作为刺杀目标。"),
-        disabledButton("选择刺杀目标（待接入）", "btn btn-danger armed", missingFeatureHints.assassinate),
+        button("选择刺杀目标", "btn btn-danger armed", openAssassinModal),
       );
     } else {
       elements.actionArea.append(paragraph("等待刺客提交刺杀目标。"));
@@ -494,7 +517,8 @@ function renderActions(snapshot) {
   }
   if (currentPhase === "GAME_OVER") {
     elements.permissionText.textContent = "结束";
-    elements.actionArea.append(paragraph(`游戏结束：${winnerLabel(snapshot.phase_summary?.winner)} 获胜。终局身份公开尚未接入。`));
+    elements.actionArea.append(paragraph(`游戏结束：${winnerLabel(snapshot.phase_summary?.winner)} 获胜。`));
+    appendRevealRoles(snapshot);
     appendHostReset(snapshot);
     return;
   }
@@ -515,8 +539,11 @@ function renderLobbyActions(snapshot) {
 
   if (you.is_host) {
     const start = button("开始游戏", "btn btn-gold", () => sendCommand({type: "start_game"}));
-    start.disabled = playerCount < 5;
-    start.title = playerCount < 5 ? "至少 5 人后可以开始游戏。" : "开始游戏";
+    start.disabled = appState.commandPending || playerCount < 5;
+    start.setAttribute("aria-disabled", start.disabled ? "true" : "false");
+    start.title = appState.commandPending
+      ? "操作正在提交，请稍候。"
+      : playerCount < 5 ? "至少 5 人后可以开始游戏。" : "开始游戏";
     elements.actionArea.append(start);
     elements.actionArea.append(button("重置房间", "btn btn-secondary", () => sendCommand({type: "reset"})));
   }
@@ -547,6 +574,129 @@ function appendTeamSummary(snapshot) {
     });
   }
   elements.actionArea.append(box);
+}
+
+function openTeamModal() {
+  const snapshot = appState.snapshot;
+  if (!snapshot) return;
+  const players = normalizePlayers(snapshot);
+  const required = Number(snapshot.phase_summary?.required_team_size) || 0;
+  const current = currentTeam(snapshot);
+  appState.selectedTeam = current.length > 0 ? current.slice(0, required) : [];
+  renderTeamModal(players, required);
+  openModal(elements.teamModal);
+}
+
+function renderTeamModal(players, required) {
+  elements.teamModalBody.replaceChildren();
+  const progress = document.createElement("div");
+  progress.className = "selection-progress";
+  progress.textContent = `已选择 ${appState.selectedTeam.length}/${required || "?"}`;
+  elements.teamModalBody.append(progress);
+
+  const grid = document.createElement("div");
+  grid.className = "picker-grid";
+  players.forEach((player) => {
+    const option = button(player.display || player.nickname || "玩家", "picker-option", () => {
+      toggleTeamMember(player.player_id, required);
+    });
+    const selected = appState.selectedTeam.includes(player.player_id);
+    option.setAttribute("aria-pressed", selected ? "true" : "false");
+    if (selected) {
+      option.classList.add("selected");
+    }
+    grid.append(option);
+  });
+  elements.teamModalBody.append(grid);
+
+  const submit = button("确认出征队伍", "btn btn-gold", submitSelectedTeam);
+  submit.disabled = appState.commandPending || appState.selectedTeam.length !== required;
+  submit.setAttribute("aria-disabled", submit.disabled ? "true" : "false");
+  elements.teamModalBody.append(submit);
+}
+
+function toggleTeamMember(playerId, required) {
+  if (appState.selectedTeam.includes(playerId)) {
+    appState.selectedTeam = appState.selectedTeam.filter((id) => id !== playerId);
+  } else {
+    if (appState.selectedTeam.length >= required) {
+      showTopError(`本轮只能选择 ${required} 名出征队员。`);
+      return;
+    }
+    appState.selectedTeam = [...appState.selectedTeam, playerId];
+  }
+  renderTeamModal(normalizePlayers(appState.snapshot), required);
+}
+
+function submitSelectedTeam() {
+  const required = Number(appState.snapshot?.phase_summary?.required_team_size) || 0;
+  if (appState.selectedTeam.length !== required) {
+    showTopError(`请先选择 ${required} 名出征队员。`);
+    return;
+  }
+  closeModals();
+  sendCommand({type: "select_team", team: appState.selectedTeam});
+}
+
+function openAssassinModal() {
+  const snapshot = appState.snapshot;
+  if (!snapshot) return;
+  appState.pendingAssassinationTarget = "";
+  renderAssassinModal(normalizePlayers(snapshot));
+  openModal(elements.assassinModal);
+}
+
+function renderAssassinModal(players) {
+  elements.assassinModalBody.replaceChildren();
+  const grid = document.createElement("div");
+  grid.className = "picker-grid";
+  players.forEach((player) => {
+    const option = button(player.display || player.nickname || "玩家", "picker-option danger-select", () => {
+      appState.pendingAssassinationTarget = player.player_id;
+      renderAssassinModal(normalizePlayers(appState.snapshot));
+    });
+    const selected = appState.pendingAssassinationTarget === player.player_id;
+    option.setAttribute("aria-pressed", selected ? "true" : "false");
+    if (selected) {
+      option.classList.add("selected");
+    }
+    grid.append(option);
+  });
+  elements.assassinModalBody.append(grid);
+
+  const submit = button("确认刺杀", "btn btn-danger armed", submitAssassination);
+  submit.disabled = appState.commandPending || !appState.pendingAssassinationTarget;
+  submit.setAttribute("aria-disabled", submit.disabled ? "true" : "false");
+  elements.assassinModalBody.append(submit);
+}
+
+function submitAssassination() {
+  const targetId = appState.pendingAssassinationTarget;
+  if (!targetId) {
+    showTopError("请先选择刺杀目标。");
+    return;
+  }
+  closeModals();
+  sendCommand({type: "assassinate", target_id: targetId});
+}
+
+function appendRevealRoles(snapshot, container = elements.actionArea) {
+  const roles = Array.isArray(snapshot?.reveal_roles) ? snapshot.reveal_roles : [];
+  if (roles.length === 0 || !container) return;
+
+  const title = document.createElement("div");
+  title.className = "modal-section-title";
+  title.textContent = "终局身份公开";
+  const list = document.createElement("div");
+  list.className = "reveal-list";
+  roles.forEach((item) => {
+    const row = document.createElement("div");
+    const side = item.side === "evil" ? "evil" : "good";
+    row.className = `reveal-row ${side}`;
+    row.textContent = `${item.display || displayName(item.player_id)}：${item.role || "未知身份"}`;
+    list.append(row);
+  });
+  container.append(title, list);
 }
 
 function appendHostReset(snapshot) {
@@ -620,6 +770,7 @@ function openInfoModal() {
     ["比分", `正义 ${summary.score_good || 0} : 邪恶 ${summary.score_evil || 0}`],
   ].forEach(([label, value]) => table.append(infoRow(label, value)));
   elements.infoModalBody.append(table);
+  appendRevealRoles(snapshot, elements.infoModalBody);
   openModal(elements.infoModal);
 }
 
@@ -739,9 +890,24 @@ function closeModals() {
   });
 }
 
+function closeActionModals() {
+  const actionModalOpen = [elements.teamModal, elements.assassinModal].some((modal) => {
+    return modal && !modal.classList.contains("hidden");
+  });
+  elements.teamModal?.classList.add("hidden");
+  elements.assassinModal?.classList.add("hidden");
+  if (actionModalOpen) elements.modalBackdrop?.classList.add("hidden");
+  appState.selectedTeam = [];
+  appState.pendingAssassinationTarget = "";
+}
+
 async function sendCommand(command) {
   if (!appState.sessionToken || !appState.roomId) {
     showTopError("请先加入房间。");
+    return;
+  }
+  if (appState.commandPending) {
+    showTopError("操作正在提交，请稍候。");
     return;
   }
   const message = {
@@ -749,8 +915,15 @@ async function sendCommand(command) {
     request_id: makeRequestId(),
     command,
   };
+  setCommandPending(createPendingCommand(command, message.request_id));
+  clearPendingAfterNoopResetDebounce(message.request_id);
   if (appState.socket?.readyState === WebSocket.OPEN) {
-    appState.socket.send(JSON.stringify(message));
+    try {
+      appState.socket.send(JSON.stringify(message));
+    } catch (_) {
+      setCommandPending(null);
+      showTopError("操作发送失败，请重试。");
+    }
     return;
   }
 
@@ -770,6 +943,8 @@ async function sendCommand(command) {
     renderSnapshot(payload.snapshot);
   } catch (error) {
     showTopError(error.message || "操作失败。");
+  } finally {
+    setCommandPending(null);
   }
 }
 
@@ -778,6 +953,10 @@ function button(label, className, onClick) {
   item.type = "button";
   item.className = className;
   item.textContent = label;
+  if (appState.commandPending) {
+    item.disabled = true;
+    item.setAttribute("aria-disabled", "true");
+  }
   item.addEventListener("click", onClick);
   return item;
 }
@@ -860,6 +1039,21 @@ function winnerLabel(winner) {
   return "未知阵营";
 }
 
+function missionResultText(snapshot) {
+  const result = snapshot?.phase_summary?.mission_result;
+  if (!result) return "任务结果已结算。";
+  const round = result.round_number ? `第 ${result.round_number} 轮` : "本轮";
+  let outcome = result.succeeded ? "任务成功" : "任务失败";
+  if (typeof result.succeeded !== "boolean") {
+    outcome = "任务已结算";
+  }
+  const failCount = numberOr(result.fail_count, 0);
+  const requiredFailCount = numberOr(result.required_fail_count, 1);
+  const good = numberOr(result.score_good, snapshot?.phase_summary?.score_good, 0);
+  const evil = numberOr(result.score_evil, snapshot?.phase_summary?.score_evil, 0);
+  return `${round}${outcome}，失败票 ${failCount}/${requiredFailCount}，比分 正义 ${good} : 邪恶 ${evil}。`;
+}
+
 function numberOr(...values) {
   for (const value of values) {
     if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -878,6 +1072,94 @@ function normalizeRoom(value) {
 function makeRequestId() {
   if (window.crypto?.randomUUID) return window.crypto.randomUUID().slice(0, 64);
   return `r-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function createPendingCommand(command, requestId) {
+  const pendingCommand = {...command};
+  if (Array.isArray(command?.team)) pendingCommand.team = command.team.slice();
+  const snapshot = appState.snapshot;
+  const phaseBefore = phase(snapshot);
+  const hadReadyPlayersBefore = normalizePlayers(snapshot).some((player) => player.ready === true);
+  return {
+    type: pendingCommand.type || "unknown",
+    command: pendingCommand,
+    requestId,
+    startedAt: Date.now(),
+    phaseBefore,
+    hadReadyPlayersBefore,
+  };
+}
+
+function snapshotAcknowledgesPendingCommand(snapshot) {
+  const pending = appState.commandPending;
+  if (!pending || !snapshot) return false;
+
+  const pendingCommand = pending.command || {};
+  const snapshotPhase = phase(snapshot);
+  if (pending.type === "ready") {
+    return snapshot.you?.ready === pendingCommand.ready;
+  }
+  if (pending.type === "start_game") {
+    return snapshotPhase !== "LOBBY";
+  }
+  if (pending.type === "reset") {
+    if (pending.phaseBefore !== "LOBBY") {
+      return snapshotPhase === "LOBBY";
+    }
+    if (pending.hadReadyPlayersBefore) {
+      return participantsAllUnready(snapshot);
+    }
+    return false;
+  }
+  if (pending.type === "select_team") {
+    return snapshotPhase !== "TEAM_PROPOSAL" || samePlayerSet(currentTeam(snapshot), pendingCommand.team);
+  }
+  if (pending.type === "team_vote") {
+    return snapshotPhase !== "TEAM_VOTE" || snapshot.my_action?.type !== "team_vote";
+  }
+  if (pending.type === "mission_vote") {
+    return snapshotPhase !== "MISSION_VOTE" || snapshot.my_action?.type !== "mission_vote";
+  }
+  if (pending.type === "continue_after_result") {
+    return snapshotPhase !== "MISSION_RESULT_DISCUSSION";
+  }
+  if (pending.type === "assassinate") {
+    return snapshotPhase === "GAME_OVER";
+  }
+
+  // Future P1 commands may add command-specific acknowledgement rules.
+  return true;
+}
+
+function samePlayerSet(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  const rightSet = new Set(right);
+  return left.every((playerId) => rightSet.has(playerId));
+}
+
+function participantsAllUnready(snapshot) {
+  const players = normalizePlayers(snapshot);
+  return players.length > 0 && players.every((player) => player.ready !== true);
+}
+
+function clearPendingAfterNoopResetDebounce(requestId) {
+  const pending = appState.commandPending;
+  if (pending?.type !== "reset" || pending.phaseBefore !== "LOBBY" || pending.hadReadyPlayersBefore) return;
+
+  // Reset while already in a clean lobby has no request-id acknowledgement in WS state;
+  // this timeout only keeps rapid duplicate clicks from producing multiple reset commands.
+  window.setTimeout(() => {
+    if (appState.commandPending?.requestId === requestId) {
+      setCommandPending(null);
+    }
+  }, 1000);
+}
+
+function setCommandPending(pending, rerender = true) {
+  appState.commandPending = pending;
+  if (rerender && appState.snapshot) {
+    renderActions(appState.snapshot);
+  }
 }
 
 function showLobby() {

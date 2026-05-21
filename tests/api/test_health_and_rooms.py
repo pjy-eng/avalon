@@ -76,6 +76,58 @@ def test_index_contains_restored_round_table_mount_points():
         assert f'id="{mount_id}"' in response.text
 
 
+def test_frontend_contains_enabled_gameplay_action_handlers():
+    main_js = (REPO_ROOT / "static" / "main.js").read_text(encoding="utf-8")
+
+    for required in [
+        "openTeamModal",
+        "submitSelectedTeam",
+        "sendCommand({type: \"select_team\", team: appState.selectedTeam})",
+        "sendCommand({type: \"team_vote\", vote: \"Approve\"})",
+        "sendCommand({type: \"team_vote\", vote: \"Reject\"})",
+        "sendCommand({type: \"mission_vote\", vote: \"Success\"})",
+        "sendCommand({type: \"mission_vote\", vote: \"Fail\"})",
+        "sendCommand({type: \"continue_after_result\"})",
+        "openAssassinModal",
+        "submitAssassination",
+        "sendCommand({type: \"assassinate\", target_id: targetId})",
+        "appendRevealRoles",
+        "missionResultText",
+        "commandPending: null",
+        "if (appState.commandPending)",
+        "createPendingCommand(command, message.request_id)",
+        "phaseBefore",
+        "hadReadyPlayersBefore",
+        "clearPendingAfterNoopResetDebounce",
+        "snapshotAcknowledgesPendingCommand(payload.snapshot)",
+        "setCommandPending(null",
+        "closeActionModals()",
+        "appState.selectedTeam = []",
+        "appState.pendingAssassinationTarget = \"\"",
+        "snapshot.my_action?.can_submit_fail === false",
+        "typeof result.succeeded !== \"boolean\"",
+        "aria-pressed",
+        "aria-disabled",
+    ]:
+        assert required in main_js
+
+    assert "if (payload.type === \"state\") {\n      setCommandPending(null" not in main_js
+    assert "if (payload.type === \"state\") {\n      setCommandPending(false" not in main_js
+    assert "setCommandPending(true)" not in main_js
+    assert 'if (pending.type === "reset") {\n    return snapshotPhase === "LOBBY";\n  }' not in main_js
+
+    for stale_label in [
+        "选择出征队伍（待接入）",
+        "赞成（待接入）",
+        "反对（待接入）",
+        "任务成功（待接入）",
+        "任务失败（待接入）",
+        "进入下一轮（待接入）",
+        "选择刺杀目标（待接入）",
+    ]:
+        assert stale_label not in main_js
+
+
 def test_missing_gameplay_doc_tracks_full_game_blockers():
     doc = (REPO_ROOT / "docs" / "MISSING_GAMEPLAY_FEATURES.md").read_text(encoding="utf-8")
 

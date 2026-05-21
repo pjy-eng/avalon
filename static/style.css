@@ -1379,6 +1379,86 @@ body {
 }
 .select-card.danger-select { color: #e06060; }
 
+.picker-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.picker-option {
+  min-height: 48px;
+  padding: 10px 8px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: center;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, box-shadow .15s, transform .1s;
+}
+.picker-option:hover {
+  background: var(--secondary);
+  border-color: var(--gold);
+}
+.picker-option:active { transform: scale(.98); }
+.picker-option.selected {
+  background: var(--secondary);
+  border-color: var(--gold);
+  box-shadow: 0 0 0 1px var(--gold);
+  color: var(--gold);
+}
+.picker-option.danger-select.selected {
+  background: var(--secondary);
+  border-color: var(--evil);
+  box-shadow: 0 0 0 1px var(--evil);
+  color: var(--evil);
+}
+
+.modal-section-title {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--gold);
+  letter-spacing: .04em;
+}
+
+.reveal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.reveal-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 32px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--foreground);
+  background: var(--secondary);
+}
+.reveal-row.good {
+  color: var(--good);
+  border: 1px solid var(--good);
+  background: var(--card);
+}
+.reveal-row.evil {
+  color: var(--evil);
+  border: 1px solid var(--evil);
+  background: var(--card);
+}
+
 /* Role modal */
 #roleModalBody { padding: 4px 0; }
 
