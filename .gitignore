@@ -1,0 +1,27 @@
+# Python
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local runtime/log files
+*.log
+*.pid
+.env
+.env.*
+
+# Build/deploy artifacts
+dist/
+build/
+site/
