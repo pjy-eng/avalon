@@ -119,3 +119,31 @@ def test_assassin_wins_when_targeting_merlin():
 
     assert game.phase == Phase.GAME_OVER
     assert game.winner == "evil"
+
+
+def test_evil_wins_immediately_after_third_failed_mission():
+    game = make_game(5)
+    for _ in range(3):
+        approve_team(game)
+        team = list(game.current_team)
+        game.submit_mission_vote(actor_id=team[0], vote="Fail")
+        for player_id in team[1:]:
+            game.submit_mission_vote(actor_id=player_id, vote="Success")
+        if game.score_evil < 3:
+            game.continue_after_mission_result()
+
+    assert game.phase == Phase.GAME_OVER
+    assert game.winner == "evil"
+
+
+def test_good_third_success_enters_assassination_without_winner():
+    game = make_game(5)
+    for _ in range(3):
+        approve_team(game)
+        for player_id in list(game.current_team):
+            game.submit_mission_vote(actor_id=player_id, vote="Success")
+        if game.score_good < 3:
+            game.continue_after_mission_result()
+
+    assert game.phase == Phase.ASSASSINATION
+    assert game.winner is None
