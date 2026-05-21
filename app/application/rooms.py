@@ -21,12 +21,18 @@ class Participant:
 
 
 @dataclass
+class RequestRecord:
+    command_type: str
+    command_payload: dict[str, Any]
+
+
+@dataclass
 class Room:
     room_id: str
     ruleset: RulesetName = RulesetName.FRIEND_FLEXIBLE
     participants: list[Participant] = field(default_factory=list)
     events: list[AppEvent] = field(default_factory=list)
-    seen_request_ids: set[tuple[str, str, str, str]] = field(default_factory=set)
+    seen_request_ids: dict[tuple[str, str, str], RequestRecord] = field(default_factory=dict)
     game: AvalonGame | None = None
 
     @property
@@ -64,6 +70,9 @@ class RoomService:
             raise CommandError("昵称不能为空。")
 
         room = self.create(room_id)
+        if room.game is not None:
+            raise CommandError("游戏开始后不能加入房间。")
+
         player_id = self._new_player_id(room)
         participant = Participant(
             player_id=player_id,

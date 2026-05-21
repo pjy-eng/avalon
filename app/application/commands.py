@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.application.events import AppEvent
-from app.application.rooms import JoinResult, RoomService
+from app.application.rooms import JoinResult, RequestRecord, RoomService
 from app.application.sessions import RoomSessionService
 from app.domain.types import CommandError
 
@@ -37,8 +37,11 @@ class CommandGateway:
             raise CommandError("房间会话已失效，请重新加入房间。")
 
         command_type = str(command.get("type") or "")
-        dedupe_key = (room.room_id, command_type, participant.player_id, request_id)
-        if dedupe_key in room.seen_request_ids:
+        dedupe_key = (room.room_id, participant.player_id, request_id)
+        existing_request = room.seen_request_ids.get(dedupe_key)
+        if existing_request is not None:
+            if existing_request.command_type != command_type or existing_request.command_payload != command:
+                raise CommandError("重复请求编号对应不同操作。")
             return CommandResult(snapshot=self.room_service.snapshot(room.room_id, viewer_id=participant.player_id))
 
         if command_type == "start_game":
@@ -50,7 +53,7 @@ class CommandGateway:
         else:
             raise CommandError("暂不支持该操作。")
 
-        room.seen_request_ids.add(dedupe_key)
+        room.seen_request_ids[dedupe_key] = RequestRecord(command_type=command_type, command_payload=dict(command))
         return result
 
     def _handle_start_game(self, room_id: str, actor_id: str, request_id: str) -> CommandResult:

@@ -51,6 +51,26 @@ def test_start_game_creates_friend_flexible_game_after_five_players():
     assert result.snapshot["room"]["ruleset"] == RulesetName.FRIEND_FLEXIBLE.value
 
 
+def test_join_after_game_started_is_rejected_without_changing_participants():
+    gateway = make_gateway()
+    joins = [gateway.handle_join(room_id="ROOM1", nickname=f"玩家{i}") for i in range(1, 6)]
+    gateway.handle_command(
+        room_id="ROOM1",
+        session_token=joins[0].session_token,
+        command={"type": "start_game"},
+        request_id="start-1",
+    )
+    before_snapshot = gateway.room_service.snapshot("ROOM1", viewer_id=joins[0].player_id)
+
+    with pytest.raises(CommandError, match="游戏开始后不能加入房间"):
+        gateway.handle_join(room_id="ROOM1", nickname="玩家6")
+
+    after_snapshot = gateway.room_service.snapshot("ROOM1", viewer_id=joins[0].player_id)
+    assert after_snapshot["room"]["status"] == "game"
+    assert after_snapshot["room"]["player_count"] == 5
+    assert after_snapshot["participants"] == before_snapshot["participants"]
+
+
 def test_non_host_cannot_reuse_seen_request_id_to_bypass_start_game_host_check():
     gateway = make_gateway()
     joins = [gateway.handle_join(room_id="ROOM1", nickname=f"玩家{i}") for i in range(1, 6)]
@@ -130,3 +150,53 @@ def test_reset_requires_host_and_returns_room_to_lobby_with_participants_retaine
     ]
     assert result.snapshot["room"]["host_id"] == joins[0].player_id
     assert all(participant["ready"] is False for participant in result.snapshot["participants"])
+
+
+def test_reusing_request_id_for_different_host_command_does_not_execute_reset():
+    gateway = make_gateway()
+    joins = [gateway.handle_join(room_id="ROOM1", nickname=f"玩家{i}") for i in range(1, 6)]
+    gateway.handle_command(
+        room_id="ROOM1",
+        session_token=joins[0].session_token,
+        command={"type": "start_game"},
+        request_id="x",
+    )
+
+    with pytest.raises(CommandError, match="重复请求编号对应不同操作"):
+        gateway.handle_command(
+            room_id="ROOM1",
+            session_token=joins[0].session_token,
+            command={"type": "reset"},
+            request_id="x",
+        )
+
+    snapshot = gateway.room_service.snapshot("ROOM1", viewer_id=joins[0].player_id)
+    assert snapshot["room"]["status"] == "game"
+    assert snapshot["phase_summary"]["phase"] == Phase.TEAM_PROPOSAL.value
+
+
+def test_repeating_same_request_id_and_command_returns_snapshot_without_new_event():
+    gateway = make_gateway()
+    host = gateway.handle_join(room_id="ROOM1", nickname="房主")
+    guest = gateway.handle_join(room_id="ROOM1", nickname="玩家2")
+    first_result = gateway.handle_command(
+        room_id="ROOM1",
+        session_token=guest.session_token,
+        command={"type": "ready", "ready": True},
+        request_id="ready-1",
+    )
+    event_count = len(gateway.room_service.get_room("ROOM1").events)
+
+    second_result = gateway.handle_command(
+        room_id="ROOM1",
+        session_token=guest.session_token,
+        command={"type": "ready", "ready": True},
+        request_id="ready-1",
+    )
+
+    assert len(gateway.room_service.get_room("ROOM1").events) == event_count
+    assert second_result.events == []
+    participants = {participant["player_id"]: participant for participant in second_result.snapshot["participants"]}
+    assert first_result.events[0].event_type == "participant_ready_changed"
+    assert participants[host.player_id]["ready"] is False
+    assert participants[guest.player_id]["ready"] is True
