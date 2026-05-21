@@ -1,139 +1,135 @@
-# Avalon Online
+# Avalon Online v2
 
-一个面向朋友局的网页版阿瓦隆原型。项目目标是让不同地点的玩家用手机打开同一个公网地址，通过房间号进入同一局游戏，完成身份分发、发言控制、组队投票、任务投票、刺杀结算和复盘。
+Avalon Online v2 是一个面向朋友局的网页版阿瓦隆原型。玩家用手机访问同一个公网地址，通过房间号加入同一局；服务端负责房间会话、身份与阶段裁定、按玩家裁剪快照、WebSocket 实时同步，以及可选语音 token 签发。
 
-当前项目采用轻量架构：FastAPI 负责 HTTP、WebSocket、房间同步和部署入口；`avalon_engine.py` 负责阿瓦隆规则状态机；`static/` 里是原生 HTML/CSS/JavaScript 前端。
+当前代码采用 authoritative modular monolith：`server.py` 只保留部署入口，实际应用在 `app/` 目录中分层组织。
 
-## 功能状态
+## 当前阶段能力
 
-- 支持 5-10 人房间。
-- 支持房主、准备、踢人、重置房间。
-- 支持私密身份分发、夜晚视野、终局身份公开。
-- 支持组队投票、任务投票、失败提案、刺杀结算。
-- 支持 WebSocket 实时同步、断线重连、文字公屏。
-- 支持可选 LiveKit 语音房。
-- 支持可选 Redis 房间持久化。
+第一阶段已经接入：
+
+- 房间加入和 per-room session token。
+- 大厅 ready、start、reset 命令。
+- 每名玩家独立的 per-player snapshot。
+- HTTP + WebSocket 实时状态同步。
+- `NoopVoiceProvider` / LiveKit voice token 接口。
+- repository 与 event log 基础代码，为后续持久化接入做好准备。
+- `static/` 第一阶段结构化 snapshot UI。
+
+仍在后续接入：
+
+- 前端发送 `select_team`、`team_vote`、`mission_vote`、`assassinate` 等完整游戏动作。
+- CommandGateway 到数据库 repository/event log 的生产持久化闭环。
+- 更完整的自动化浏览器和多人联机验收。
 
 ## 本地启动
-
-建议先创建虚拟环境：
 
 ```bash
 cd /Users/vangogh/Monorepo/avalon
 
 python -m venv .venv
 source .venv/bin/activate
-
 pip install -r requirements.txt
-```
 
-启动开发服务：
-
-```bash
 uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-如果 `8000` 已被占用，换一个端口：
+如果 `8000` 被占用：
 
 ```bash
 uvicorn server:app --host 127.0.0.1 --port 8001 --reload
 ```
 
-打开浏览器：
+浏览器访问：
 
 ```text
 http://127.0.0.1:8000
 ```
 
-或：
-
-```text
-http://127.0.0.1:8001
-```
-
-局域网手机测试时，可以绑定到所有网卡：
+手机局域网测试时可以绑定所有网卡：
 
 ```bash
 uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
-然后用手机访问 Mac 的局域网 IP，例如：
-
-```text
-http://192.168.x.x:8000
-```
+然后用手机访问 Mac 的局域网 IP。
 
 ## 测试
-
-运行规则引擎单元测试：
 
 ```bash
 pytest -q
 ```
 
-当前测试重点覆盖 `avalon_engine.py` 的核心阶段流转和胜负规则。前端和 WebSocket 流程暂时没有自动化测试。
+快速确认部署入口：
 
-## 公网部署
+```bash
+python -c "from server import app; print(app.title)"
+```
 
-这个项目不是纯静态站点，不能直接用 GitHub Pages 部署完整功能。GitHub 只负责托管代码，真正运行服务的是 Render 这类云平台。
+期望输出：
 
-仓库已经包含 `render.yaml`，Render 会执行：
+```text
+Avalon Online v2
+```
+
+## Render 部署
+
+本项目不是纯静态站点，不能只靠 GitHub Pages 托管完整功能。Render 需要运行 Python 服务并保持 HTTP/WebSocket 后端在线。
+
+`render.yaml` 的 start command 应保持：
+
+```bash
+uvicorn server:app --host 0.0.0.0 --port $PORT
+```
+
+Render 会使用：
 
 ```bash
 pip install -r requirements.txt
 uvicorn server:app --host 0.0.0.0 --port $PORT
 ```
 
-部署成功后，Render 会提供公网地址，朋友们可以用手机打开这个地址并通过同一个房间号加入游戏。
-
-完整部署说明见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+部署细节见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
 
 ## 环境变量
 
-基础游戏流程不依赖 Redis 或 LiveKit。未配置时：
-
-- 房间状态只保存在当前进程内，服务重启后会丢失。
-- 语音按钮会提示 LiveKit 未配置，但文字和游戏流程仍可使用。
-
-可选环境变量：
-
 ```text
+DATABASE_URL=postgresql+psycopg://...
 REDIS_URL=redis://...
+SESSION_SECRET=change-me-in-production
 LIVEKIT_URL=wss://...
 LIVEKIT_API_KEY=...
 LIVEKIT_API_SECRET=...
 PORT=8000
 ```
 
-## 项目文档
+说明：
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：项目架构、模块职责、状态流。
-- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)：GitHub + Render 公网部署流程。
-- [docs/VERSIONING.md](docs/VERSIONING.md)：版本号、提交信息、发布记录约定。
-- [CHANGELOG.md](CHANGELOG.md)：版本变更记录。
+- `DATABASE_URL`：可选，Postgres repository/event log 基础设施使用；当前生产命令流尚未完整持久化接入。
+- `REDIS_URL`：可选；未配置时 Redis 状态为 `not_configured`，当前房间主要保存在进程内。
+- `SESSION_SECRET`：线上必须设置为稳定强随机值；未设置时使用本地开发默认值。
+- `LIVEKIT_URL`、`LIVEKIT_API_KEY`、`LIVEKIT_API_SECRET`：三者都配置时启用 LiveKit token；缺任一项时使用 Noop voice provider。
+- `PORT`：Render 自动提供；本地可手动指定。
 
-## 主要目录
+## 项目结构
 
 ```text
-.
-├── server.py              FastAPI 服务、WebSocket、房间、Redis、LiveKit token
-├── avalon_engine.py       阿瓦隆规则状态机
-├── static/
-│   ├── index.html         页面结构
-│   ├── main.js            前端状态渲染、交互、WebSocket、语音
-│   └── style.css          视觉样式和响应式布局
-├── tests/
-│   └── test_engine.py     规则引擎测试
-├── docs/                  架构、部署、版本管理文档
-├── requirements.txt       Python 依赖
-├── render.yaml            Render 部署配置
-└── runtime.txt            Python 运行版本
+server.py                  部署入口，导出 app.main:app
+app/main.py                FastAPI app factory、依赖装配
+app/domain/                AvalonGame 规则核心、规则集、类型
+app/application/           sessions、rooms、commands、snapshots、events
+app/infrastructure/        db、repositories、redis_store、voice
+app/api/                   HTTP 与 WebSocket 路由
+app/realtime/              WebSocket ConnectionManager
+static/                    第一阶段结构化 snapshot UI
+tests/                     后端规则和服务测试
+docs/                      架构、部署、版本说明
+render.yaml                Render 部署配置
 ```
 
-## 协作约定
+## 项目文档
 
-- 改游戏规则时，优先修改 `avalon_engine.py`，并补充 `tests/test_engine.py`。
-- 改房间、WebSocket、断线重连、Redis、LiveKit 时，优先修改 `server.py`。
-- 改页面体验时，先确认后端快照字段是否足够，再修改 `static/main.js` 和 `static/style.css`。
-- 不提交 `.venv/`、`__pycache__/`、`.DS_Store`、pytest cache 等本地生成文件。
-- 每次可试玩版本发布后，更新 `CHANGELOG.md`。
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：v2 模块架构、数据流、隐私边界。
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)：Render 部署、环境变量、部署后验证。
+- [docs/VERSIONING.md](docs/VERSIONING.md)：版本号、提交信息、发布记录约定。
+- [CHANGELOG.md](CHANGELOG.md)：版本变更记录。

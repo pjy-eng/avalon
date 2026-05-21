@@ -8,14 +8,19 @@
 
 ### Added
 
+- 新增 Avalon Online v2 modular monolith 文档，说明 `server.py` 入口、`app/domain`、`app/application`、`app/infrastructure`、`app/api`、`app/realtime` 和 `static` 的职责边界。
+- 新增 v2 Render 部署说明，覆盖 `DATABASE_URL`、`REDIS_URL`、`SESSION_SECRET`、LiveKit 环境变量、`PORT` 和部署后验证路径。
+- 新增第一阶段能力说明：房间加入、room session、ready/start/reset、per-player snapshots、WebSocket realtime、Noop/LiveKit voice token，以及 repository/event log 基础。
 - 新增项目 README，说明本地启动、测试、公网部署、环境变量和协作约定。
-- 新增架构文档，说明 `server.py`、`avalon_engine.py`、`static/` 的职责边界。
+- 新增架构文档，说明后端入口、规则核心、应用服务、基础设施和 `static/` 的职责边界。
 - 新增 Render 部署文档，解释 GitHub 托管代码、Render 运行服务的关系。
 - 新增版本管理约定，统一后续提交、tag 和发布记录方式。
 - 新增 `.gitignore`，忽略 Python 缓存、虚拟环境、系统文件和本地环境变量。
 
 ### Changed
 
+- 将文档入口更新为 Avalon Online v2，移除旧规则入口和单文件服务作为当前架构的描述。
+- 明确完整游戏动作和生产持久化闭环仍是后续接入，不把 repository/event log 基础写成已完成线上持久化。
 - 将原始 README 从一句话说明扩展为项目入口文档。
 
 ### Removed
