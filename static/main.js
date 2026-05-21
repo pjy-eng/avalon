@@ -91,9 +91,26 @@ window.addEventListener("load", () => {
   const roomFromUrl = params.get("room");
   const storedRoom = localStorage.getItem("avalon_last_room") || "";
   const storedName = localStorage.getItem("avalon_player_name") || "";
-  const preferredRoom = roomFromUrl || storedRoom;
-  if (preferredRoom) $("roomInput").value = preferredRoom.toUpperCase();
+
+  // Pre-fill from URL param only
+  if (roomFromUrl) $("roomInput").value = roomFromUrl.toUpperCase();
   $("nameInput").value = storedName;
+
+  // Show "continue last room" card if has stored room (and no URL param filling the field)
+  if (storedRoom && !roomFromUrl) {
+    const card = $("lastRoomCard");
+    if (card) {
+      card.classList.remove("hidden");
+      const nameEl = $("lastRoomName");
+      if (nameEl) nameEl.textContent = "房间 #" + storedRoom;
+      card.addEventListener("click", () => {
+        $("roomInput").value = storedRoom;
+        if (storedName) $("nameInput").value = storedName;
+        $("nameInput").focus();
+      });
+    }
+  }
+
   $("joinBtn").addEventListener("click", joinRoom);
   $("copyRoomBtn").addEventListener("click", copyInviteLink);
   $("resetBtn").addEventListener("click", () => {
@@ -110,15 +127,22 @@ window.addEventListener("load", () => {
   $("chatInput").addEventListener("keydown", (e) => {
     if (e.key === "Enter") sendChat();
   });
+  ["roomInput", "nameInput"].forEach(id => {
+    $(id)?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") joinRoom();
+    });
+  });
   $("voiceBtn").addEventListener("click", toggleVoice);
   const listenBtn = $("listenBtn");
   if (listenBtn) listenBtn.addEventListener("click", toggleListenOnly);
-  if (preferredRoom && storedName) {
+
+  // Auto-enter ONLY when URL explicitly carries ?room=xxx
+  if (roomFromUrl && storedName) {
     autoEntering = true;
     $("joinView").classList.add("hidden");
     $("gameView").classList.remove("hidden");
     showTopError("正在恢复房间连接……");
-    roomId = normalizeRoom(preferredRoom);
+    roomId = normalizeRoom(roomFromUrl);
     myName = storedName.trim().slice(0, 24) || "玩家";
     shouldReconnect = true;
     connectWebSocket();
@@ -419,17 +443,19 @@ function renderPlayers(players, signal, you) {
     card.className = classes.join(" ");
     card.dataset.playerId = p.id;
     if (isSelf) card.title = "点击查看身份牌";
+    // Set marks as data-attribute for CSS ::before corner badge
+    if (marks[p.id]) card.setAttribute("data-marks", marks[p.id]);
+    else card.removeAttribute("data-marks");
     const tags = [];
     if (isSelf) tags.push(`<span class="tag self">自己</span>`);
     if (p.is_host) tags.push(`<span class="tag host">房主</span>`);
     if (latestState?.current_phase === "LOBBY" && !p.is_host) tags.push(`<span class="tag ${p.is_ready ? 'ready' : 'not-ready'}">${p.is_ready ? '已准备' : '未准备'}</span>`);
     if (isLeader) tags.push(`<span class="tag leader">队长</span>`);
-    if (teamIds.has(p.id)) tags.push(`<span class="tag team">上车</span>`);
+    if (teamIds.has(p.id)) tags.push(`<span class="tag team">出征</span>`);
     if (p.id === active) tags.push(`<span class="tag self">发言中</span>`);
     if (!p.connected) tags.push(`<span class="tag offline">离线</span>`);
-    if (marks[p.id]) tags.push(`<span class="tag mark">标:${escapeHtml(marks[p.id])}</span>`);
     const canKick = currentPayload?.state?.permissions?.can_kick && p.id !== you.id;
-    card.innerHTML = `<div class="seat-top"><div class="seat-num">${seat}</div>${isSpeaking ? `<div class="mic-indicator">🎙</div>` : ""}</div><div class="seat-main"><div class="seat-name">${escapeHtml(displayPlayer(p))}</div><div class="seat-tags">${tags.join("")}${canKick ? `<button class="kick-btn" data-kick="${escapeHtml(p.id)}">踢</button>` : ""}</div></div>`;
+    card.innerHTML = `<div class="seat-top"><div class="seat-num">${seat}</div>${isSpeaking ? `<div class="mic-indicator">🎙</div>` : ""}</div><div class="seat-main"><div class="seat-name">${escapeHtml(p.name || "玩家")}</div><div class="seat-tags">${tags.join("")}${canKick ? `<button class="kick-btn" data-kick="${escapeHtml(p.id)}">踢</button>` : ""}</div></div>`;
     card.addEventListener("click", (e) => {
       if (e.target?.dataset?.kick) return;
       if (isSelf) openIdentityOverlay();
@@ -468,7 +494,7 @@ function renderActions(payload) {
     const readyRequired = perms.ready_required ?? signal.ready_required ?? Math.max(0, (state.players || []).length - 1);
     if (perms.can_start_game) {
       area.innerHTML = `<p>全员已准备，可以开始本局。</p>`;
-      area.appendChild(button("全员已准备，开始游戏", "btn btn-primary", () => {
+      area.appendChild(button("全员已准备，开始游戏", "btn btn-gold", () => {
         clearPrivateMarksForCurrentRoom();
         send({ type: "start_game" });
       }));
@@ -1256,8 +1282,11 @@ function escapeHtml(s) { return String(s ?? "").replace(/[&<>'"]/g, c => ({ "&":
 function copyInviteLink() {
   const url = `${location.origin}/?room=${encodeURIComponent(roomId)}`;
   navigator.clipboard?.writeText(url);
-  $("copyRoomBtn").textContent = "已复制";
-  setTimeout(() => $("copyRoomBtn").textContent = "复制邀请", 1200);
+  const label = $("copyRoomBtn")?.querySelector(".ctrl-label");
+  if (label) {
+    label.textContent = "已复制";
+    setTimeout(() => { label.textContent = "邀请"; }, 1400);
+  }
 }
 
 async function toggleVoice() {
@@ -1554,24 +1583,30 @@ function updateVoiceButtons(extraStatus="") {
   const voiceBtn = $("voiceBtn");
   const listenBtn = $("listenBtn");
 
+  const voiceLabel = voiceBtn?.querySelector(".ctrl-label");
+  const voiceIcon  = voiceBtn?.querySelector(".ctrl-icon");
+  const listenLabel = listenBtn?.querySelector(".ctrl-label");
+
   if (micEnabled) {
     const canSpeak = !!currentPayload?.state?.control_signal?.personal_audio_allowed;
-    voiceBtn.textContent = extraStatus ? `语音 · ${extraStatus}` : "关闭语音";
-    voiceBtn.title = canSpeak ? "当前可说话" : "当前禁麦";
+    if (voiceLabel) voiceLabel.textContent = extraStatus ? extraStatus : "关麦";
+    if (voiceIcon)  voiceIcon.textContent  = canSpeak ? "🎙" : "🔇";
+    voiceBtn.title = canSpeak ? "当前可说话（点击关闭）" : "当前禁麦（点击关闭）";
     voiceBtn.classList.add("voice-on");
   } else {
-    voiceBtn.textContent = extraStatus ? `语音 · ${extraStatus}` : "启用语音";
+    if (voiceLabel) voiceLabel.textContent = extraStatus ? extraStatus : "语音";
+    if (voiceIcon)  voiceIcon.textContent  = "🎙";
     voiceBtn.title = "点击启用麦克风";
     voiceBtn.classList.remove("voice-on");
   }
 
   if (listenBtn) {
     if (speakerEnabled) {
-      listenBtn.textContent = extraStatus ? `扬声器 · ${extraStatus}` : "关闭扬声器";
+      if (listenLabel) listenLabel.textContent = extraStatus ? extraStatus : "静音";
       listenBtn.title = "点击关闭远端声音";
       listenBtn.classList.add("voice-on");
     } else {
-      listenBtn.textContent = extraStatus ? `扬声器 · ${extraStatus}` : "打开扬声器";
+      if (listenLabel) listenLabel.textContent = extraStatus ? extraStatus : "扬声器";
       listenBtn.title = "点击播放远端声音";
       listenBtn.classList.remove("voice-on");
     }
