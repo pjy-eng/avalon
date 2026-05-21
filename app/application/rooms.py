@@ -4,8 +4,9 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from app.application.events import AppEvent
+from app.application.events import AppEvent, utc_now_iso
 from app.application.sessions import RoomSessionService
+from app.application.snapshots import SnapshotProjector
 from app.domain.game import AvalonGame
 from app.domain.types import CommandError, Phase, RulesetName
 
@@ -27,11 +28,20 @@ class RequestRecord:
 
 
 @dataclass
+class ChatMessage:
+    author_id: str
+    text: str
+    message_id: str = field(default_factory=lambda: str(uuid4()))
+    created_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass
 class Room:
     room_id: str
     ruleset: RulesetName = RulesetName.FRIEND_FLEXIBLE
     participants: list[Participant] = field(default_factory=list)
     events: list[AppEvent] = field(default_factory=list)
+    chat_history: list[ChatMessage] = field(default_factory=list)
     seen_request_ids: dict[tuple[str, str, str], RequestRecord] = field(default_factory=dict)
     game: AvalonGame | None = None
 
@@ -186,10 +196,16 @@ class RoomService:
         room.events.append(event)
         return event
 
-    def snapshot(self, room_id: str, viewer_id: str | None = None) -> dict[str, Any]:
+    def snapshot(
+        self,
+        room_id: str,
+        viewer_id: str | None = None,
+        online_counts: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
         room = self.get_room(room_id)
         participants = sorted(room.participants, key=lambda item: item.seat)
         status = "lobby" if room.game is None else "game"
+        phase = Phase.LOBBY if room.game is None else room.game.phase
         snapshot: dict[str, Any] = {
             "room": {
                 "room_id": room.room_id,
@@ -209,9 +225,14 @@ class RoomService:
                 for participant in participants
             ],
             "you": self._you_payload(room, viewer_id),
+            "voice_state": self._voice_state(phase),
+            "speaker_state": self._speaker_state(phase),
+            "online_state": self._online_state(participants, online_counts),
+            "chat_history": self._chat_history(room),
         }
         if room.game is None:
             snapshot["phase_summary"] = {"phase": Phase.LOBBY.value}
+            snapshot["public_timeline"] = self._public_timeline(room)
         else:
             game = room.game
             snapshot["phase_summary"] = {
@@ -224,6 +245,10 @@ class RoomService:
                 "score_evil": game.score_evil,
                 "winner": game.winner,
             }
+            mission_result = SnapshotProjector.latest_mission_result(room.events)
+            if mission_result is not None:
+                snapshot["phase_summary"]["mission_result"] = mission_result
+            snapshot["public_timeline"] = SnapshotProjector.public_timeline(game, room.events)
         return snapshot
 
     def _new_player_id(self, room: Room) -> str:
@@ -246,3 +271,123 @@ class RoomService:
             "is_host": participant.is_host,
             "ready": participant.ready,
         }
+
+    @staticmethod
+    def _voice_state(phase: Phase) -> dict[str, Any]:
+        can_publish_audio = phase not in {Phase.TEAM_VOTE, Phase.MISSION_VOTE}
+        return {
+            "can_publish_audio": can_publish_audio,
+            "publish_policy": "open" if can_publish_audio else "muted",
+        }
+
+    @staticmethod
+    def _speaker_state(phase: Phase) -> dict[str, Any]:
+        can_speak = phase not in {Phase.TEAM_VOTE, Phase.MISSION_VOTE}
+        return {
+            "mode": "open" if can_speak else "muted",
+            "can_send_text": can_speak,
+        }
+
+    @staticmethod
+    def _online_state(participants: list[Participant], online_counts: dict[str, int] | None) -> dict[str, Any]:
+        counts = online_counts or {}
+        return {
+            "players": [
+                {
+                    "player_id": participant.player_id,
+                    "online": int(counts.get(participant.player_id, 0)) > 0,
+                    "connection_count": max(0, int(counts.get(participant.player_id, 0))),
+                }
+                for participant in participants
+            ]
+        }
+
+    def _chat_history(self, room: Room) -> list[dict[str, Any]]:
+        return [
+            {
+                "message_id": self._message_value(message, "message_id", ""),
+                "author_id": self._message_value(message, "author_id", ""),
+                "author_display": self._display_name(room, str(self._message_value(message, "author_id", ""))),
+                "text": self._message_value(message, "text", ""),
+                "created_at": self._message_value(message, "created_at", ""),
+            }
+            for message in room.chat_history[-50:]
+        ]
+
+    def _display_name(self, room: Room, player_id: str) -> str:
+        participant = next((item for item in room.participants if item.player_id == player_id), None)
+        if participant is None:
+            return "未知玩家"
+        return f"{participant.seat}号-{participant.nickname}"
+
+    def _public_timeline(self, room: Room) -> list[dict[str, Any]]:
+        timeline = []
+        for event in room.events:
+            summary = self._lobby_event_summary(room, event)
+            if summary is None:
+                continue
+            timeline.append(
+                {
+                    "kind": event.event_type,
+                    "summary": summary,
+                    "created_at": event.created_at,
+                }
+            )
+        return timeline
+
+    def _lobby_event_summary(self, room: Room, event: AppEvent) -> str | None:
+        payload = event.payload
+        if event.event_type == "game_started":
+            player_count = len(payload.get("players", [])) or len(room.participants)
+            return f"游戏开始，共 {player_count} 名玩家。"
+        if event.event_type == "team_selected":
+            leader_id = str(payload.get("leader_id") or event.actor_id or "")
+            team = self._display_list(room, payload.get("team", []))
+            return f"第 {payload.get('round_number')} 轮，队长 {self._display_name(room, leader_id)} 选择队伍：{team}。"
+        if event.event_type == "team_vote_resolved":
+            result = "通过" if payload.get("approved") else "未通过"
+            return (
+                f"第 {payload.get('round_number')} 轮组队投票{result}："
+                f"{payload.get('approve_count', 0)} 票同意，{payload.get('reject_count', 0)} 票反对。"
+            )
+        if event.event_type == "mission_resolved":
+            result = "成功" if payload.get("succeeded") else "失败"
+            return (
+                f"第 {payload.get('round_number')} 轮任务{result}：失败票 "
+                f"{payload.get('fail_count', 0)}/{payload.get('required_fail_count', 1)}，"
+                f"比分 好人 {payload.get('score_good', 0)} - 邪恶 {payload.get('score_evil', 0)}。"
+            )
+        if event.event_type == "round_advanced":
+            leader_id = str(payload.get("leader_id") or "")
+            return (
+                f"进入第 {payload.get('round_number')} 轮，队长 {self._display_name(room, leader_id)}，"
+                f"需选择 {payload.get('required_team_size')} 人。"
+            )
+        if event.event_type == "assassination_resolved":
+            target_id = str(payload.get("target_id") or "")
+            winner = self._winner_label(payload.get("winner"))
+            return f"刺杀目标 {self._display_name(room, target_id)}，{winner}阵营获胜。"
+        if event.event_type == "game_over":
+            winner = self._winner_label(payload.get("winner"))
+            reason = "任务" if payload.get("reason") == "missions" else "刺杀"
+            return f"游戏结束，{winner}阵营获胜，原因：{reason}。"
+        return None
+
+    def _display_list(self, room: Room, player_ids: Any) -> str:
+        if not isinstance(player_ids, list):
+            return "未知玩家"
+        return "、".join(self._display_name(room, str(player_id)) for player_id in player_ids)
+
+    @staticmethod
+    def _winner_label(winner: Any) -> str:
+        if winner == "good":
+            return "好人"
+        if winner == "evil":
+            return "邪恶"
+        return "未知"
+
+    @staticmethod
+    def _message_value(source: Any, key: str, default: Any) -> Any:
+        if isinstance(source, dict):
+            return source.get(key, default)
+        return getattr(source, key, default)

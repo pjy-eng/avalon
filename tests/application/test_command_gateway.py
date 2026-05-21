@@ -298,6 +298,7 @@ def test_team_vote_command_resolves_approved_team_without_revealing_personal_vot
     assert "team_votes" not in result.snapshot
     resolved_events = [event for event in result.events if event.event_type == "team_vote_resolved"]
     assert resolved_events
+    assert resolved_events[0].actor_id is None
     assert resolved_events[0].payload["approved"] is True
     assert resolved_events[0].payload["approve_count"] == len(joins)
     assert resolved_events[0].payload["reject_count"] == 0
@@ -367,6 +368,7 @@ def test_mission_vote_command_resolves_result_and_keeps_votes_secret():
     assert "mission_votes" not in result.snapshot
     mission_events = [event for event in result.events if event.event_type == "mission_resolved"]
     assert mission_events
+    assert mission_events[0].actor_id is None
     assert mission_events[0].payload["fail_count"] == 0
     assert mission_events[0].payload["succeeded"] is True
 
@@ -434,3 +436,6 @@ def test_assassinate_command_ends_game_and_reveals_roles_only_at_game_over():
     assert "reveal_roles" in result.snapshot
     assert {item["player_id"] for item in result.snapshot["reveal_roles"]} == set(players)
     assert result.events[0].event_type == "assassination_resolved"
+    game_over_events = [event for event in result.events if event.event_type == "game_over"]
+    assert game_over_events
+    assert game_over_events[0].actor_id is None
