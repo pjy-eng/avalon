@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 
-from app.domain.rulesets import CONFIG
+from app.domain.rulesets import CONFIG, RULESETS
 from app.domain.types import CommandError, EVIL_ROLES, Phase, Role, RulesetName
 
 
@@ -32,10 +32,17 @@ class AvalonGame:
         ruleset: RulesetName,
         rng_seed: int | None = None,
     ) -> "AvalonGame":
+        if ruleset not in RULESETS:
+            raise CommandError("暂不支持该规则集。")
+        if len(set(players)) != len(players):
+            raise CommandError("玩家 ID 不能重复。")
+        if set(player_names) != set(players):
+            raise CommandError("玩家名称必须覆盖且只覆盖本局玩家。")
         if len(players) not in CONFIG:
             raise CommandError("阿瓦隆必须 5-10 人才能开始。")
+        config = CONFIG[len(players)]
         rng = random.Random(rng_seed)
-        roles = CONFIG[len(players)]["roles"][:]
+        roles = list(config.roles)
         rng.shuffle(roles)
         leader_index = rng.randrange(len(players))
         return cls(
@@ -46,7 +53,7 @@ class AvalonGame:
             phase=Phase.TEAM_PROPOSAL,
             round_number=1,
             leader_index=leader_index,
-            required_team_size=CONFIG[len(players)]["mission_sizes"][0],
+            required_team_size=config.mission_sizes[0],
         )
 
     @property
@@ -110,6 +117,17 @@ class AvalonGame:
                 self.phase = Phase.ASSASSINATION
             else:
                 self.phase = Phase.MISSION_RESULT_DISCUSSION
+
+    def continue_after_mission_result(self) -> None:
+        self._require_phase(Phase.MISSION_RESULT_DISCUSSION)
+        self.round_number += 1
+        config = CONFIG[len(self.player_order)]
+        self.required_team_size = config.mission_sizes[self.round_number - 1]
+        self.leader_index = (self.leader_index + 1) % len(self.player_order)
+        self.current_team = []
+        self.team_votes = {}
+        self.mission_votes = {}
+        self.phase = Phase.TEAM_PROPOSAL
 
     def submit_assassination(self, actor_id: str, target_id: str) -> None:
         self._require_phase(Phase.ASSASSINATION)
