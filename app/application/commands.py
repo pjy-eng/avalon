@@ -6,8 +6,7 @@ from typing import Any
 from app.application.events import AppEvent
 from app.application.rooms import JoinResult, RoomService
 from app.application.sessions import RoomSessionService
-from app.domain.game import AvalonGame
-from app.domain.types import CommandError, RulesetName
+from app.domain.types import CommandError
 
 
 @dataclass(frozen=True)
@@ -37,45 +36,41 @@ class CommandGateway:
         if participant.token_version != claims.token_version:
             raise CommandError("房间会话已失效，请重新加入房间。")
 
-        if request_id in room.seen_request_ids:
+        command_type = str(command.get("type") or "")
+        dedupe_key = (room.room_id, command_type, participant.player_id, request_id)
+        if dedupe_key in room.seen_request_ids:
             return CommandResult(snapshot=self.room_service.snapshot(room.room_id, viewer_id=participant.player_id))
 
-        command_type = str(command.get("type") or "")
         if command_type == "start_game":
             result = self._handle_start_game(room_id=room.room_id, actor_id=participant.player_id, request_id=request_id)
+        elif command_type == "ready":
+            result = self._handle_ready(room_id=room.room_id, actor_id=participant.player_id, request_id=request_id, command=command)
+        elif command_type == "reset":
+            result = self._handle_reset(room_id=room.room_id, actor_id=participant.player_id, request_id=request_id)
         else:
             raise CommandError("暂不支持该操作。")
 
-        room.seen_request_ids.add(request_id)
+        room.seen_request_ids.add(dedupe_key)
         return result
 
     def _handle_start_game(self, room_id: str, actor_id: str, request_id: str) -> CommandResult:
-        room = self.room_service.get_room(room_id)
-        if actor_id != room.host_id:
-            raise CommandError("只有房主可以开局。")
-        if len(room.participants) < 5:
-            raise CommandError("阿瓦隆至少 5 人才能开始。")
-        if room.game is not None:
-            raise CommandError("游戏已经开始。")
-
-        players = self.room_service.player_order(room)
-        player_names = self.room_service.player_names(room)
-        game = AvalonGame.new(
-            players=players,
-            player_names=player_names,
-            ruleset=RulesetName.FRIEND_FLEXIBLE,
-        )
-        room.game = game
-        room.ruleset = game.ruleset
-        event = AppEvent(
-            event_type="game_started",
-            room_id=room.room_id,
-            actor_id=actor_id,
-            payload={"ruleset": game.ruleset.value, "players": players},
-            request_id=request_id,
-        )
-        room.events.append(event)
+        event = self.room_service.start(room_id=room_id, actor_id=actor_id, request_id=request_id)
         return CommandResult(
-            snapshot=self.room_service.snapshot(room.room_id, viewer_id=actor_id),
+            snapshot=self.room_service.snapshot(room_id, viewer_id=actor_id),
+            events=[event],
+        )
+
+    def _handle_ready(self, room_id: str, actor_id: str, request_id: str, command: dict[str, Any]) -> CommandResult:
+        ready = bool(command.get("ready", True))
+        event = self.room_service.ready(room_id=room_id, actor_id=actor_id, ready=ready, request_id=request_id)
+        return CommandResult(
+            snapshot=self.room_service.snapshot(room_id, viewer_id=actor_id),
+            events=[event],
+        )
+
+    def _handle_reset(self, room_id: str, actor_id: str, request_id: str) -> CommandResult:
+        event = self.room_service.reset(room_id=room_id, actor_id=actor_id, request_id=request_id)
+        return CommandResult(
+            snapshot=self.room_service.snapshot(room_id, viewer_id=actor_id),
             events=[event],
         )

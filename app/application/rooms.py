@@ -16,6 +16,7 @@ class Participant:
     nickname: str
     seat: int
     is_host: bool = False
+    ready: bool = False
     token_version: int = 1
 
 
@@ -25,7 +26,7 @@ class Room:
     ruleset: RulesetName = RulesetName.FRIEND_FLEXIBLE
     participants: list[Participant] = field(default_factory=list)
     events: list[AppEvent] = field(default_factory=list)
-    seen_request_ids: set[str] = field(default_factory=set)
+    seen_request_ids: set[tuple[str, str, str, str]] = field(default_factory=set)
     game: AvalonGame | None = None
 
     @property
@@ -47,15 +48,22 @@ class RoomService:
         self.session_service = session_service
         self._rooms: dict[str, Room] = {}
 
-    def join(self, room_id: str, nickname: str) -> JoinResult:
+    def create(self, room_id: str) -> Room:
         normalized_room_id = room_id.strip()
-        normalized_nickname = nickname.strip()
         if not normalized_room_id:
             raise CommandError("房间号不能为空。")
+        room = self._rooms.get(normalized_room_id)
+        if room is None:
+            room = Room(room_id=normalized_room_id)
+            self._rooms[normalized_room_id] = room
+        return room
+
+    def join(self, room_id: str, nickname: str) -> JoinResult:
+        normalized_nickname = nickname.strip()
         if not normalized_nickname:
             raise CommandError("昵称不能为空。")
 
-        room = self._rooms.setdefault(normalized_room_id, Room(room_id=normalized_room_id))
+        room = self.create(room_id)
         player_id = self._new_player_id(room)
         participant = Participant(
             player_id=player_id,
@@ -74,6 +82,7 @@ class RoomService:
                     "nickname": participant.nickname,
                     "seat": participant.seat,
                     "is_host": participant.is_host,
+                    "ready": participant.ready,
                 },
             )
         )
@@ -107,15 +116,78 @@ class RoomService:
     def player_names(self, room: Room) -> dict[str, str]:
         return {participant.player_id: participant.nickname for participant in sorted(room.participants, key=lambda item: item.seat)}
 
+    def ready(self, room_id: str, actor_id: str, request_id: str, ready: bool = True) -> AppEvent:
+        room = self.get_room(room_id)
+        if room.game is not None:
+            raise CommandError("游戏开始后不能修改准备状态。")
+        participant = self.get_participant(room, actor_id)
+        participant.ready = ready
+        event = AppEvent(
+            event_type="participant_ready_changed",
+            room_id=room.room_id,
+            actor_id=actor_id,
+            payload={"player_id": actor_id, "ready": participant.ready},
+            request_id=request_id,
+        )
+        room.events.append(event)
+        return event
+
+    def start(self, room_id: str, actor_id: str, request_id: str) -> AppEvent:
+        room = self.get_room(room_id)
+        if actor_id != room.host_id:
+            raise CommandError("只有房主可以开局。")
+        if len(room.participants) < 5:
+            raise CommandError("阿瓦隆至少 5 人才能开始。")
+        if room.game is not None:
+            raise CommandError("游戏已经开始。")
+
+        players = self.player_order(room)
+        player_names = self.player_names(room)
+        game = AvalonGame.new(
+            players=players,
+            player_names=player_names,
+            ruleset=RulesetName.FRIEND_FLEXIBLE,
+        )
+        room.game = game
+        room.ruleset = game.ruleset
+        event = AppEvent(
+            event_type="game_started",
+            room_id=room.room_id,
+            actor_id=actor_id,
+            payload={"ruleset": game.ruleset.value, "players": players},
+            request_id=request_id,
+        )
+        room.events.append(event)
+        return event
+
+    def reset(self, room_id: str, actor_id: str, request_id: str) -> AppEvent:
+        room = self.get_room(room_id)
+        if actor_id != room.host_id:
+            raise CommandError("只有房主可以重置房间。")
+        room.game = None
+        for participant in room.participants:
+            participant.ready = False
+        event = AppEvent(
+            event_type="room_reset",
+            room_id=room.room_id,
+            actor_id=actor_id,
+            payload={"player_ids": self.player_order(room)},
+            request_id=request_id,
+        )
+        room.events.append(event)
+        return event
+
     def snapshot(self, room_id: str, viewer_id: str | None = None) -> dict[str, Any]:
         room = self.get_room(room_id)
         participants = sorted(room.participants, key=lambda item: item.seat)
+        status = "lobby" if room.game is None else "game"
         snapshot: dict[str, Any] = {
             "room": {
                 "room_id": room.room_id,
                 "ruleset": room.ruleset.value,
                 "host_id": room.host_id,
                 "player_count": len(participants),
+                "status": status,
             },
             "participants": [
                 {
@@ -123,6 +195,7 @@ class RoomService:
                     "nickname": participant.nickname,
                     "seat": participant.seat,
                     "is_host": participant.is_host,
+                    "ready": participant.ready,
                 }
                 for participant in participants
             ],
@@ -162,4 +235,5 @@ class RoomService:
             "nickname": participant.nickname,
             "seat": participant.seat,
             "is_host": participant.is_host,
+            "ready": participant.ready,
         }

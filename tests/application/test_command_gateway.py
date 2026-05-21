@@ -49,3 +49,84 @@ def test_start_game_creates_friend_flexible_game_after_five_players():
 
     assert result.snapshot["phase_summary"]["phase"] == Phase.TEAM_PROPOSAL.value
     assert result.snapshot["room"]["ruleset"] == RulesetName.FRIEND_FLEXIBLE.value
+
+
+def test_non_host_cannot_reuse_seen_request_id_to_bypass_start_game_host_check():
+    gateway = make_gateway()
+    joins = [gateway.handle_join(room_id="ROOM1", nickname=f"玩家{i}") for i in range(1, 6)]
+
+    gateway.handle_command(
+        room_id="ROOM1",
+        session_token=joins[0].session_token,
+        command={"type": "start_game"},
+        request_id="start-1",
+    )
+
+    with pytest.raises(CommandError, match="只有房主可以开局"):
+        gateway.handle_command(
+            room_id="ROOM1",
+            session_token=joins[1].session_token,
+            command={"type": "start_game"},
+            request_id="start-1",
+        )
+
+
+def test_ready_command_marks_participant_ready_in_lobby_snapshot():
+    gateway = make_gateway()
+    host = gateway.handle_join(room_id="ROOM1", nickname="房主")
+    guest = gateway.handle_join(room_id="ROOM1", nickname="玩家2")
+
+    result = gateway.handle_command(
+        room_id="ROOM1",
+        session_token=guest.session_token,
+        command={"type": "ready", "ready": True},
+        request_id="ready-1",
+    )
+
+    participants = {participant["player_id"]: participant for participant in result.snapshot["participants"]}
+    assert result.snapshot["room"]["status"] == "lobby"
+    assert result.snapshot["phase_summary"]["phase"] == Phase.LOBBY.value
+    assert participants[host.player_id]["ready"] is False
+    assert participants[guest.player_id]["ready"] is True
+
+
+def test_reset_requires_host_and_returns_room_to_lobby_with_participants_retained():
+    gateway = make_gateway()
+    joins = [gateway.handle_join(room_id="ROOM1", nickname=f"玩家{i}") for i in range(1, 6)]
+
+    for index, join in enumerate(joins):
+        gateway.handle_command(
+            room_id="ROOM1",
+            session_token=join.session_token,
+            command={"type": "ready", "ready": True},
+            request_id=f"ready-{index}",
+        )
+    gateway.handle_command(
+        room_id="ROOM1",
+        session_token=joins[0].session_token,
+        command={"type": "start_game"},
+        request_id="start-1",
+    )
+
+    with pytest.raises(CommandError, match="只有房主可以重置房间"):
+        gateway.handle_command(
+            room_id="ROOM1",
+            session_token=joins[1].session_token,
+            command={"type": "reset"},
+            request_id="reset-guest",
+        )
+
+    result = gateway.handle_command(
+        room_id="ROOM1",
+        session_token=joins[0].session_token,
+        command={"type": "reset"},
+        request_id="reset-host",
+    )
+
+    assert result.snapshot["room"]["status"] == "lobby"
+    assert result.snapshot["phase_summary"]["phase"] == Phase.LOBBY.value
+    assert [participant["player_id"] for participant in result.snapshot["participants"]] == [
+        join.player_id for join in joins
+    ]
+    assert result.snapshot["room"]["host_id"] == joins[0].player_id
+    assert all(participant["ready"] is False for participant in result.snapshot["participants"])
