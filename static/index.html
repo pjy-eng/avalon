@@ -8,10 +8,56 @@
   </head>
   <body>
     <main class="app-shell">
-      <section class="panel">
+      <section class="panel" id="joinPanel">
         <p class="eyebrow">Avalon Online v2</p>
         <h1>阿瓦隆圆桌</h1>
-        <p id="statusText">正在连接服务...</p>
+        <p class="muted">输入房间号和昵称，加入同一局朋友局。</p>
+        <label for="roomInput">房间号</label>
+        <input id="roomInput" autocomplete="off" inputmode="latin" placeholder="例如 ROOM1">
+        <label for="nameInput">昵称</label>
+        <input id="nameInput" autocomplete="nickname" placeholder="你的昵称">
+        <button id="joinButton" type="button">加入房间</button>
+        <p id="statusText" class="status-text" role="status">服务就绪后即可加入房间。</p>
+      </section>
+
+      <section class="panel game-panel" id="gamePanel" hidden>
+        <div class="room-header">
+          <div>
+            <p class="eyebrow">当前房间</p>
+            <h1 id="roomLabel">未加入房间</h1>
+          </div>
+          <p id="phaseSummary" class="phase-summary">等待快照...</p>
+        </div>
+
+        <section class="section-block">
+          <h2>玩家</h2>
+          <ul id="playersList" class="players-list"></ul>
+        </section>
+
+        <section class="section-block">
+          <h2>当前操作</h2>
+          <div id="primaryAction" class="action-area"></div>
+        </section>
+
+        <section class="section-block">
+          <h2>身份信息</h2>
+          <div id="privatePanel" class="private-panel">开局后显示你的身份。</div>
+        </section>
+
+        <section class="section-block">
+          <h2>语音状态</h2>
+          <div id="voiceState" class="voice-state">大厅阶段暂未开放语音状态。</div>
+        </section>
+
+        <section class="section-block">
+          <h2>公共时间线</h2>
+          <ol id="publicTimeline" class="timeline"></ol>
+        </section>
+
+        <section class="section-block">
+          <h2>消息</h2>
+          <div id="messageLog" class="message-log" aria-live="polite"></div>
+        </section>
       </section>
     </main>
     <script src="/static/main.js"></script>

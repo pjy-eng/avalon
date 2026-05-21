@@ -42,6 +42,31 @@ def test_create_app_serves_index_outside_repo_cwd(monkeypatch, tmp_path):
     assert ".app-shell" in static_response.text
 
 
+def test_index_contains_structured_snapshot_mount_points():
+    client = TestClient(create_app())
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    for mount_id in [
+        "roomInput",
+        "nameInput",
+        "joinButton",
+        "joinPanel",
+        "gamePanel",
+        "roomLabel",
+        "phaseSummary",
+        "playersList",
+        "primaryAction",
+        "privatePanel",
+        "voiceState",
+        "publicTimeline",
+        "messageLog",
+        "statusText",
+    ]:
+        assert f'id="{mount_id}"' in response.text
+
+
 def test_join_room_returns_session_token_and_snapshot():
     client = TestClient(create_app(Settings(session_secret=SESSION_SECRET)))
 
