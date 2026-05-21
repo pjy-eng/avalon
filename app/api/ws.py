@@ -69,7 +69,7 @@ async def room_websocket(websocket: WebSocket, room_id: str) -> None:
         return
     finally:
         if connected and connected_room_id is not None and player_id is not None:
-            manager.disconnect(connected_room_id, player_id)
+            manager.disconnect(connected_room_id, player_id, websocket)
 
 
 async def _handle_message(

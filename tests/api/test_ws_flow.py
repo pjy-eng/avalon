@@ -136,3 +136,44 @@ def test_ws_broadcasts_per_player_state_after_command():
     assert host_payload["snapshot"]["you"]["player_id"] == joins[0]["player_id"]
     assert guest_payload["snapshot"]["you"]["player_id"] == joins[1]["player_id"]
     assert host_payload["snapshot"]["private_panel"] != guest_payload["snapshot"]["private_panel"]
+
+
+def test_ws_same_player_multiple_connections_receive_broadcasts_after_old_connection_closes():
+    client = make_client()
+    join = client.post("/api/rooms/ROOM1/join", json={"nickname": "阿澈"}).json()
+
+    with client.websocket_connect("/ws/ROOM1") as old_ws:
+        assert hello(old_ws, join["session_token"])["type"] == "state"
+        with client.websocket_connect("/ws/ROOM1") as new_ws:
+            assert hello(new_ws, join["session_token"])["type"] == "state"
+
+            new_ws.send_json(
+                {
+                    "type": "command",
+                    "request_id": "ready-1",
+                    "command": {"type": "ready", "ready": True},
+                }
+            )
+            old_payload = old_ws.receive_json()
+            new_payload = new_ws.receive_json()
+
+            old_ws.close()
+            new_ws.send_json(
+                {
+                    "type": "command",
+                    "request_id": "ready-2",
+                    "command": {"type": "ready", "ready": False},
+                }
+            )
+            remaining_payload = new_ws.receive_json()
+
+    assert old_payload["type"] == "state"
+    assert new_payload["type"] == "state"
+    assert remaining_payload["type"] == "state"
+    assert old_payload["snapshot"]["you"]["player_id"] == join["player_id"]
+    assert new_payload["snapshot"]["you"]["player_id"] == join["player_id"]
+    assert remaining_payload["snapshot"]["you"]["player_id"] == join["player_id"]
+    participant = next(
+        item for item in remaining_payload["snapshot"]["participants"] if item["player_id"] == join["player_id"]
+    )
+    assert participant["ready"] is False
