@@ -99,6 +99,13 @@ class RoomRepository:
 
     def get_room_bundle(self, room_id: str) -> dict:
         room = self.session.get(RoomRecord, room_id)
+        if room is None:
+            return {
+                "room": None,
+                "participants": [],
+                "game": None,
+            }
+
         participants = self.session.scalars(
             select(ParticipantRecord)
             .where(ParticipantRecord.room_id == room_id)

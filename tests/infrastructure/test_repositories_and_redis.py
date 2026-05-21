@@ -117,6 +117,21 @@ def test_room_repository_missing_room_bundle_has_empty_shape():
     }
 
 
+def test_room_repository_missing_room_ignores_orphaned_participants_and_game():
+    engine = make_test_engine()
+
+    with session_scope(engine) as session:
+        repository = RoomRepository(session)
+        repository.upsert_participant("ROOM1", "p1", "一号", 1, "player", 1)
+        repository.upsert_game("ROOM1", "team_building", {"leader": "p1"})
+
+    assert get_room_bundle(engine, "ROOM1") == {
+        "room": None,
+        "participants": [],
+        "game": None,
+    }
+
+
 def test_in_memory_ttl_store_set_once_get_and_delete():
     now = 1000.0
     store = InMemoryTTLStore(clock=lambda: now)
