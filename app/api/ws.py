@@ -17,6 +17,7 @@ HELLO_SESSION_TOKEN_ERROR = "第一条消息必须包含 session_token。"
 REQUEST_ID_REQUIRED_ERROR = "request_id 不能为空。"
 REQUEST_ID_TYPE_ERROR = "request_id 必须是字符串。"
 REQUEST_ID_TOO_LONG_ERROR = "request_id 长度不能超过 128。"
+ROOM_MISSING_ON_DISCONNECT_ERROR = "房间不存在，请重新加入。"
 
 
 @router.websocket("/ws/{room_id}")
@@ -52,10 +53,12 @@ async def room_websocket(websocket: WebSocket, room_id: str) -> None:
         connected_room_id = room.room_id
         manager.connect(room.room_id, player_id, websocket)
         connected = True
-        await manager.send_to_player(
+        await manager.broadcast_room(
             room.room_id,
-            player_id,
-            {"type": "state", "snapshot": command_gateway._snapshot_for_actor(room.room_id, player_id)},
+            payload_factory=lambda target_player_id: {
+                "type": "state",
+                "snapshot": command_gateway._snapshot_for_actor(room.room_id, target_player_id),
+            },
         )
 
         while True:
@@ -73,6 +76,17 @@ async def room_websocket(websocket: WebSocket, room_id: str) -> None:
     finally:
         if connected and connected_room_id is not None and player_id is not None:
             manager.disconnect(connected_room_id, player_id, websocket)
+            try:
+                await manager.broadcast_room(
+                    connected_room_id,
+                    payload_factory=lambda target_player_id: {
+                        "type": "state",
+                        "snapshot": command_gateway._snapshot_for_actor(connected_room_id, target_player_id),
+                    },
+                )
+            except CommandError as exc:
+                if str(exc) != ROOM_MISSING_ON_DISCONNECT_ERROR:
+                    raise
 
 
 async def _handle_message(

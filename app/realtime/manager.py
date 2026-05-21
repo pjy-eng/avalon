@@ -34,6 +34,12 @@ class ConnectionManager:
         if not room_connections:
             self._rooms.pop(room_id, None)
 
+    def online_counts(self, room_id: str) -> dict[str, int]:
+        return {
+            player_id: len(player_connections)
+            for player_id, player_connections in self._rooms.get(room_id, {}).items()
+        }
+
     async def send_to_player(self, room_id: str, player_id: str, payload: dict[str, Any]) -> None:
         websockets = list(self._rooms.get(room_id, {}).get(player_id, set()))
         for websocket in websockets:

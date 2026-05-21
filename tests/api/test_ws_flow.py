@@ -167,6 +167,7 @@ def test_ws_broadcasts_per_player_state_after_command():
         host_initial = hello(host_ws, joins[0]["session_token"])
         with client.websocket_connect("/ws/ROOM1") as guest_ws:
             guest_initial = hello(guest_ws, joins[1]["session_token"])
+            host_guest_connect_payload = host_ws.receive_json()
 
             host_ws.send_json(
                 {
@@ -180,6 +181,13 @@ def test_ws_broadcasts_per_player_state_after_command():
 
     assert host_initial["snapshot"]["you"]["player_id"] == joins[0]["player_id"]
     assert guest_initial["snapshot"]["you"]["player_id"] == joins[1]["player_id"]
+    assert host_guest_connect_payload["type"] == "state"
+    host_online = {
+        item["player_id"]: item["online"]
+        for item in host_guest_connect_payload["snapshot"]["online_state"]["players"]
+    }
+    assert host_online[joins[0]["player_id"]] is True
+    assert host_online[joins[1]["player_id"]] is True
     assert host_payload["type"] == "state"
     assert guest_payload["type"] == "state"
     assert host_payload["snapshot"]["you"]["player_id"] == joins[0]["player_id"]
@@ -195,6 +203,7 @@ def test_ws_same_player_multiple_connections_receive_broadcasts_after_old_connec
         assert hello(old_ws, join["session_token"])["type"] == "state"
         with client.websocket_connect("/ws/ROOM1") as new_ws:
             assert hello(new_ws, join["session_token"])["type"] == "state"
+            old_after_new_connect = old_ws.receive_json()
 
             new_ws.send_json(
                 {
@@ -207,6 +216,7 @@ def test_ws_same_player_multiple_connections_receive_broadcasts_after_old_connec
             new_payload = new_ws.receive_json()
 
             old_ws.close()
+            new_after_old_close = new_ws.receive_json()
             new_ws.send_json(
                 {
                     "type": "command",
@@ -216,9 +226,24 @@ def test_ws_same_player_multiple_connections_receive_broadcasts_after_old_connec
             )
             remaining_payload = new_ws.receive_json()
 
+    assert old_after_new_connect["type"] == "state"
     assert old_payload["type"] == "state"
     assert new_payload["type"] == "state"
+    assert new_after_old_close["type"] == "state"
     assert remaining_payload["type"] == "state"
+    old_connect_online = next(
+        item
+        for item in old_after_new_connect["snapshot"]["online_state"]["players"]
+        if item["player_id"] == join["player_id"]
+    )
+    assert old_connect_online["connection_count"] == 2
+    new_close_online = next(
+        item
+        for item in new_after_old_close["snapshot"]["online_state"]["players"]
+        if item["player_id"] == join["player_id"]
+    )
+    assert new_close_online["online"] is True
+    assert new_close_online["connection_count"] == 1
     assert old_payload["snapshot"]["you"]["player_id"] == join["player_id"]
     assert new_payload["snapshot"]["you"]["player_id"] == join["player_id"]
     assert remaining_payload["snapshot"]["you"]["player_id"] == join["player_id"]
@@ -226,3 +251,32 @@ def test_ws_same_player_multiple_connections_receive_broadcasts_after_old_connec
         item for item in remaining_payload["snapshot"]["participants"] if item["player_id"] == join["player_id"]
     )
     assert participant["ready"] is False
+
+
+def test_ws_broadcasts_online_state_when_players_connect_and_disconnect():
+    client = make_client()
+    joins = join_players(client, count=5)
+
+    with client.websocket_connect("/ws/ROOM1") as host_ws:
+        host_initial = hello(host_ws, joins[0]["session_token"])
+        assert host_initial["snapshot"]["online_state"]["players"][0]["online"] is True
+
+        with client.websocket_connect("/ws/ROOM1") as guest_ws:
+            guest_initial = hello(guest_ws, joins[1]["session_token"])
+            host_after_guest_connect = host_ws.receive_json()
+
+        host_after_guest_disconnect = host_ws.receive_json()
+
+    assert guest_initial["type"] == "state"
+    connected = {
+        item["player_id"]: item["online"]
+        for item in host_after_guest_connect["snapshot"]["online_state"]["players"]
+    }
+    disconnected = {
+        item["player_id"]: item["online"]
+        for item in host_after_guest_disconnect["snapshot"]["online_state"]["players"]
+    }
+    assert connected[joins[0]["player_id"]] is True
+    assert connected[joins[1]["player_id"]] is True
+    assert disconnected[joins[0]["player_id"]] is True
+    assert disconnected[joins[1]["player_id"]] is False

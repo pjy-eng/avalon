@@ -22,8 +22,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     room_service = RoomService(session_service=session_service)
     app.state.session_service = session_service
     app.state.room_service = room_service
-    app.state.command_gateway = CommandGateway(room_service, session_service)
-    app.state.connection_manager = ConnectionManager()
+    connection_manager = ConnectionManager()
+    app.state.connection_manager = connection_manager
+    app.state.command_gateway = CommandGateway(
+        room_service,
+        session_service,
+        online_players_provider=connection_manager.online_counts,
+    )
     if app_settings.voice_status == "configured":
         app.state.voice_provider = LiveKitVoiceProvider(
             app_settings.livekit_url or "",
