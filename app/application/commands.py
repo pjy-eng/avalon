@@ -6,6 +6,7 @@ from typing import Any
 from app.application.events import AppEvent
 from app.application.rooms import JoinResult, RequestRecord, RoomService
 from app.application.sessions import RoomSessionService
+from app.application.snapshots import SnapshotProjector
 from app.domain.types import CommandError
 
 
@@ -42,7 +43,7 @@ class CommandGateway:
         if existing_request is not None:
             if existing_request.command_type != command_type or existing_request.command_payload != command:
                 raise CommandError("重复请求编号对应不同操作。")
-            return CommandResult(snapshot=self.room_service.snapshot(room.room_id, viewer_id=participant.player_id))
+            return CommandResult(snapshot=self._snapshot_for_actor(room.room_id, participant.player_id))
 
         if command_type == "start_game":
             result = self._handle_start_game(room_id=room.room_id, actor_id=participant.player_id, request_id=request_id)
@@ -59,7 +60,7 @@ class CommandGateway:
     def _handle_start_game(self, room_id: str, actor_id: str, request_id: str) -> CommandResult:
         event = self.room_service.start(room_id=room_id, actor_id=actor_id, request_id=request_id)
         return CommandResult(
-            snapshot=self.room_service.snapshot(room_id, viewer_id=actor_id),
+            snapshot=self._snapshot_for_actor(room_id, actor_id),
             events=[event],
         )
 
@@ -67,13 +68,24 @@ class CommandGateway:
         ready = bool(command.get("ready", True))
         event = self.room_service.ready(room_id=room_id, actor_id=actor_id, ready=ready, request_id=request_id)
         return CommandResult(
-            snapshot=self.room_service.snapshot(room_id, viewer_id=actor_id),
+            snapshot=self._snapshot_for_actor(room_id, actor_id),
             events=[event],
         )
 
     def _handle_reset(self, room_id: str, actor_id: str, request_id: str) -> CommandResult:
         event = self.room_service.reset(room_id=room_id, actor_id=actor_id, request_id=request_id)
         return CommandResult(
-            snapshot=self.room_service.snapshot(room_id, viewer_id=actor_id),
+            snapshot=self._snapshot_for_actor(room_id, actor_id),
             events=[event],
+        )
+
+    def _snapshot_for_actor(self, room_id: str, actor_id: str) -> dict[str, Any]:
+        room = self.room_service.get_room(room_id)
+        if room.game is None:
+            return self.room_service.snapshot(room_id, viewer_id=actor_id)
+        return SnapshotProjector.for_player(
+            game=room.game,
+            player_id=actor_id,
+            host_id=room.host_id,
+            room_id=room.room_id,
         )

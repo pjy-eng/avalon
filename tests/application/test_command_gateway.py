@@ -51,6 +51,24 @@ def test_start_game_creates_friend_flexible_game_after_five_players():
     assert result.snapshot["room"]["ruleset"] == RulesetName.FRIEND_FLEXIBLE.value
 
 
+def test_start_game_returns_private_per_player_snapshot_without_secret_tables():
+    gateway = make_gateway()
+    joins = [gateway.handle_join(room_id="ROOM1", nickname=f"玩家{i}") for i in range(1, 6)]
+
+    result = gateway.handle_command(
+        room_id="ROOM1",
+        session_token=joins[0].session_token,
+        command={"type": "start_game"},
+        request_id="start-private",
+    )
+
+    assert result.snapshot["you"]["player_id"] == joins[0].player_id
+    assert "private_panel" in result.snapshot
+    assert "roles" not in result.snapshot
+    assert "team_votes" not in result.snapshot
+    assert "mission_votes" not in result.snapshot
+
+
 def test_join_after_game_started_is_rejected_without_changing_participants():
     gateway = make_gateway()
     joins = [gateway.handle_join(room_id="ROOM1", nickname=f"玩家{i}") for i in range(1, 6)]
