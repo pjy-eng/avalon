@@ -13,10 +13,15 @@ class SnapshotProjector:
             "room": {
                 "room_id": room_id,
                 "ruleset": game.ruleset.value,
+                "host_id": host_id,
+                "player_count": len(game.player_order),
+                "status": "game",
             },
             "you": {
                 "player_id": player_id,
                 "is_host": player_id == host_id,
+                "nickname": game.player_names[player_id],
+                "seat": game.player_order.index(player_id) + 1,
             },
             "phase_summary": {
                 "phase": game.phase.value,
@@ -37,6 +42,9 @@ class SnapshotProjector:
                 {
                     "player_id": candidate_id,
                     "display": cls._display(game, candidate_id),
+                    "seat": game.player_order.index(candidate_id) + 1,
+                    "nickname": game.player_names[candidate_id],
+                    "is_host": candidate_id == host_id,
                     "is_leader": candidate_id == game.leader_id,
                 }
                 for candidate_id in game.player_order

@@ -17,8 +17,16 @@ def test_snapshot_only_exposes_current_player_role_and_no_vote_or_role_tables():
     game = make_game(5)
     player_id = game.player_order[0]
 
-    snapshot = SnapshotProjector.for_player(game=game, player_id=player_id, host_id=None, room_id="ROOM1")
+    snapshot = SnapshotProjector.for_player(game=game, player_id=player_id, host_id=player_id, room_id="ROOM1")
 
+    assert snapshot["room"]["host_id"] == player_id
+    assert snapshot["room"]["player_count"] == 5
+    assert snapshot["room"]["status"] == "game"
+    assert snapshot["you"]["nickname"] == game.player_names[player_id]
+    assert snapshot["you"]["seat"] == 1
+    assert snapshot["players"][0]["seat"] == 1
+    assert snapshot["players"][0]["nickname"] == game.player_names[player_id]
+    assert snapshot["players"][0]["is_host"] is True
     assert snapshot["private_panel"]["role"] == game.roles[player_id].value
     assert "roles" not in snapshot
     assert "team_votes" not in snapshot

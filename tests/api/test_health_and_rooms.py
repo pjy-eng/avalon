@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import jwt
 from fastapi.testclient import TestClient
 
@@ -5,6 +7,7 @@ from app.config import Settings
 from app.main import create_app
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 SESSION_SECRET = "test-session-secret-with-enough-length"
 LIVEKIT_SECRET = "test-livekit-secret-with-enough-length"
 
@@ -37,12 +40,12 @@ def test_create_app_serves_index_outside_repo_cwd(monkeypatch, tmp_path):
     static_response = client.get("/static/style.css")
 
     assert index_response.status_code == 200
-    assert "Avalon Online v2" in index_response.text
+    assert "阿瓦隆圆桌" in index_response.text
     assert static_response.status_code == 200
     assert ".app-shell" in static_response.text
 
 
-def test_index_contains_structured_snapshot_mount_points():
+def test_index_contains_restored_round_table_mount_points():
     client = TestClient(create_app())
 
     response = client.get("/")
@@ -51,20 +54,43 @@ def test_index_contains_structured_snapshot_mount_points():
     for mount_id in [
         "roomInput",
         "nameInput",
-        "joinButton",
-        "joinPanel",
-        "gamePanel",
-        "roomLabel",
-        "phaseSummary",
+        "joinBtn",
+        "joinView",
+        "gameView",
+        "oddPlayersList",
+        "evenPlayersList",
+        "roomCode",
+        "phaseTitle",
+        "scoreText",
+        "announcementText",
+        "permissionText",
+        "actionArea",
+        "chatMessages",
+        "dealOverlay",
+        "infoModal",
+        "historyModal",
+        "teamModal",
+        "assassinModal",
         "playersList",
-        "primaryAction",
-        "privatePanel",
-        "voiceState",
-        "publicTimeline",
-        "messageLog",
-        "statusText",
     ]:
         assert f'id="{mount_id}"' in response.text
+
+
+def test_missing_gameplay_doc_tracks_full_game_blockers():
+    doc = (REPO_ROOT / "docs" / "MISSING_GAMEPLAY_FEATURES.md").read_text(encoding="utf-8")
+
+    for required in [
+        "select_team",
+        "team_vote",
+        "mission_vote",
+        "continue_after_result",
+        "assassinate",
+        "public_timeline",
+        "reveal_roles",
+    ]:
+        assert required in doc
+
+    assert "当前版本不能完成一整局游戏" in doc
 
 
 def test_join_room_returns_session_token_and_snapshot():
