@@ -112,14 +112,17 @@ function bindEvents() {
   elements.roomInput?.addEventListener("keydown", submitJoinOnEnter);
   elements.nameInput?.addEventListener("keydown", submitJoinOnEnter);
   elements.copyRoomBtn?.addEventListener("click", copyInviteLink);
-  elements.backBtn?.addEventListener("click", leaveRoom);
+  elements.backBtn?.addEventListener("click", handleBackButton);
   elements.resetBtn?.addEventListener("click", () => sendCommand({type: "reset"}));
   elements.infoMiniBtn?.addEventListener("click", () => openInfoModal());
   elements.openInfoBtn?.addEventListener("click", () => openInfoModal());
   elements.openHistoryBtn?.addEventListener("click", () => openHistoryModal());
-  elements.sendChatBtn?.addEventListener("click", () => showTopError(missingFeatureHints.chat));
+  elements.sendChatBtn?.addEventListener("click", sendChatMessage);
   elements.chatInput?.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") showTopError(missingFeatureHints.chat);
+    if (event.key === "Enter") {
+      event.preventDefault();
+      sendChatMessage();
+    }
   });
   elements.dealCard?.addEventListener("click", () => {
     elements.dealCard?.classList.toggle("flipped");
@@ -163,9 +166,6 @@ function disableUnsupportedChrome() {
   disableControl(elements.voiceBtn, missingFeatureHints.voice);
   disableControl(elements.listenBtn, missingFeatureHints.voice);
   disableControl(elements.openTagsBtn, missingFeatureHints.tags);
-  disableControl(elements.chatInput, missingFeatureHints.chat);
-  disableControl(elements.sendChatBtn, missingFeatureHints.chat);
-  if (elements.chatStatusText) elements.chatStatusText.textContent = "待接入";
 }
 
 function disableControl(element, reason) {
@@ -234,8 +234,14 @@ function connectWebSocket() {
       return;
     }
     if (payload.type === "state") {
-      if (snapshotAcknowledgesPendingCommand(payload.snapshot)) {
-        setCommandPending(null, false);
+      const pendingType = appState.commandPending?.type || "";
+      const acknowledged = snapshotAcknowledgesPendingCommand(payload.snapshot);
+      if (acknowledged) {
+        handleAcknowledgedPendingCommand(payload.snapshot);
+      }
+      if ((pendingType === "leave_room" && acknowledged) || snapshotMissingCurrentPlayer(payload.snapshot)) {
+        leaveRoom();
+        return;
       }
       appState.snapshot = payload.snapshot;
       renderSnapshot(payload.snapshot);
@@ -245,6 +251,12 @@ function connectWebSocket() {
       setCommandPending(null, false);
       showTopError(payload.message || "服务端返回错误。");
       renderActions(appState.snapshot);
+      renderChatControls(appState.snapshot);
+      return;
+    }
+    if (payload.type === "removed") {
+      setCommandPending(null, false);
+      leaveRoom();
       return;
     }
     if (payload.type === "pong") {
@@ -281,6 +293,14 @@ function leaveRoom() {
   showLobby();
 }
 
+async function handleBackButton() {
+  if (phase(appState.snapshot) === "LOBBY" && appState.sessionToken) {
+    await sendCommand({type: "leave_room"});
+    return;
+  }
+  leaveRoom();
+}
+
 function renderSnapshot(snapshot) {
   if (!snapshot) return;
   const nextPhase = snapshot.phase_summary?.phase || "LOBBY";
@@ -298,7 +318,8 @@ function renderSnapshot(snapshot) {
   renderAnnouncement(snapshot, players);
   renderActions(snapshot);
   renderIdentityHint(snapshot);
-  renderChat();
+  renderChat(snapshot);
+  renderChatControls(snapshot);
   updateHostControls(snapshot);
 
   if (phaseChanged) {
@@ -546,6 +567,8 @@ function renderLobbyActions(snapshot) {
       : playerCount < 5 ? "至少 5 人后可以开始游戏。" : "开始游戏";
     elements.actionArea.append(start);
     elements.actionArea.append(button("重置房间", "btn btn-secondary", () => sendCommand({type: "reset"})));
+  } else {
+    elements.actionArea.append(button("退出房间", "btn btn-secondary", () => sendCommand({type: "leave_room"})));
   }
 
   const hint = playerCount < 5
@@ -718,16 +741,46 @@ function renderIdentityHint(snapshot) {
   elements.identityHint.textContent = `ⓘ 你的身份：${role}。点击自己的席位可再次查看。`;
 }
 
-function renderChat() {
+function renderChat(snapshot) {
   elements.chatMessages.replaceChildren();
-  const messages = appState.messages.slice(-40);
+  const serverMessages = Array.isArray(snapshot?.chat_history) ? snapshot.chat_history.slice(-40) : null;
+  const messages = serverMessages || appState.messages.slice(-40);
   if (messages.length === 0) {
-    elements.chatMessages.append(chatLine("系统", "文字公屏待接入，当前仅显示系统提示。", true));
+    elements.chatMessages.append(chatLine("系统", "暂无公屏消息。", true));
     return;
   }
   messages.forEach((message) => {
-    elements.chatMessages.append(chatLine(message.author, message.text, message.error));
+    elements.chatMessages.append(chatLine(message.author_display || message.author || "系统", message.text, message.error));
   });
+}
+
+function renderChatControls(snapshot) {
+  const canSendText = Boolean(snapshot?.speaker_state?.can_send_text);
+  const disabled = !canSendText || Boolean(appState.commandPending) || !appState.sessionToken;
+  if (elements.chatInput) {
+    elements.chatInput.disabled = disabled;
+    elements.chatInput.setAttribute("aria-disabled", disabled ? "true" : "false");
+    elements.chatInput.placeholder = canSendText ? "输入公屏消息" : "当前阶段禁止发言";
+    elements.chatInput.title = canSendText ? "发送公屏消息" : "组队投票和任务投票阶段禁言。";
+  }
+  if (elements.sendChatBtn) {
+    elements.sendChatBtn.disabled = disabled;
+    elements.sendChatBtn.setAttribute("aria-disabled", disabled ? "true" : "false");
+    elements.sendChatBtn.title = canSendText ? "发送" : "当前阶段禁止发言";
+  }
+  if (elements.chatStatusText) {
+    elements.chatStatusText.textContent = canSendText ? "可发言" : "禁言中";
+  }
+}
+
+async function sendChatMessage() {
+  const text = (elements.chatInput?.value || "").trim();
+  if (!text) return;
+  if (text.length > 300) {
+    showTopError("消息不能超过 300 字。");
+    return;
+  }
+  await sendCommand({type: "send_chat", text});
 }
 
 function chatLine(author, text, muted = false) {
@@ -770,8 +823,42 @@ function openInfoModal() {
     ["比分", `正义 ${summary.score_good || 0} : 邪恶 ${summary.score_evil || 0}`],
   ].forEach(([label, value]) => table.append(infoRow(label, value)));
   elements.infoModalBody.append(table);
+  appendGovernanceControls(snapshot, players);
   appendRevealRoles(snapshot, elements.infoModalBody);
   openModal(elements.infoModal);
+}
+
+function appendGovernanceControls(snapshot, players) {
+  if (!snapshot.you?.is_host || phase(snapshot) !== "LOBBY") return;
+  const targets = players.filter((player) => !player.is_host);
+  if (targets.length === 0) return;
+
+  const sectionTitle = document.createElement("h3");
+  sectionTitle.className = "modal-section-title";
+  sectionTitle.textContent = "大厅管理";
+  const list = document.createElement("div");
+  list.className = "governance-list";
+  targets.forEach((player) => {
+    const row = document.createElement("div");
+    row.className = "governance-row";
+    const label = document.createElement("span");
+    label.textContent = player.display;
+    const actions = document.createElement("div");
+    actions.className = "governance-actions";
+    actions.append(
+      button("转让房主", "mini-btn", () => {
+        closeModals();
+        sendCommand({type: "transfer_host", target_id: player.player_id});
+      }),
+      button("踢出", "mini-btn danger", () => {
+        closeModals();
+        sendCommand({type: "kick_player", target_id: player.player_id});
+      }),
+    );
+    row.append(label, actions);
+    list.append(row);
+  });
+  elements.infoModalBody.append(sectionTitle, list);
 }
 
 function openHistoryModal() {
@@ -904,11 +991,11 @@ function closeActionModals() {
 async function sendCommand(command) {
   if (!appState.sessionToken || !appState.roomId) {
     showTopError("请先加入房间。");
-    return;
+    return false;
   }
   if (appState.commandPending) {
     showTopError("操作正在提交，请稍候。");
-    return;
+    return false;
   }
   const message = {
     type: "command",
@@ -923,8 +1010,9 @@ async function sendCommand(command) {
     } catch (_) {
       setCommandPending(null);
       showTopError("操作发送失败，请重试。");
+      return false;
     }
-    return;
+    return true;
   }
 
   try {
@@ -939,10 +1027,20 @@ async function sendCommand(command) {
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.detail || "操作失败。");
+    const acknowledged = snapshotAcknowledgesPendingCommand(payload.snapshot);
+    if (acknowledged) {
+      handleAcknowledgedPendingCommand(payload.snapshot);
+    }
+    if (command.type === "leave_room") {
+      leaveRoom();
+      return true;
+    }
     appState.snapshot = payload.snapshot;
     renderSnapshot(payload.snapshot);
+    return true;
   } catch (error) {
     showTopError(error.message || "操作失败。");
+    return false;
   } finally {
     setCommandPending(null);
   }
@@ -1087,6 +1185,7 @@ function createPendingCommand(command, requestId) {
     startedAt: Date.now(),
     phaseBefore,
     hadReadyPlayersBefore,
+    actorId: snapshot?.you?.player_id || appState.playerId,
   };
 }
 
@@ -1111,6 +1210,20 @@ function snapshotAcknowledgesPendingCommand(snapshot) {
     }
     return false;
   }
+  if (pending.type === "send_chat") {
+    return Array.isArray(snapshot.chat_history) && snapshot.chat_history.some((message) => {
+      return message.request_id === pending.requestId && message.author_id === pending.actorId;
+    });
+  }
+  if (pending.type === "kick_player") {
+    return !normalizePlayers(snapshot).some((player) => player.player_id === pendingCommand.target_id);
+  }
+  if (pending.type === "transfer_host") {
+    return snapshot.room?.host_id === pendingCommand.target_id;
+  }
+  if (pending.type === "leave_room") {
+    return !snapshot.you || !normalizePlayers(snapshot).some((player) => player.player_id === pending.actorId);
+  }
   if (pending.type === "select_team") {
     return snapshotPhase !== "TEAM_PROPOSAL" || samePlayerSet(currentTeam(snapshot), pendingCommand.team);
   }
@@ -1131,6 +1244,15 @@ function snapshotAcknowledgesPendingCommand(snapshot) {
   return true;
 }
 
+function handleAcknowledgedPendingCommand(snapshot) {
+  const pending = appState.commandPending;
+  if (!pending) return;
+  if (pending.type === "send_chat" && elements.chatInput && elements.chatInput.value.trim() === pending.command.text) {
+    elements.chatInput.value = "";
+  }
+  setCommandPending(null, false);
+}
+
 function samePlayerSet(left, right) {
   if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
   const rightSet = new Set(right);
@@ -1140,6 +1262,11 @@ function samePlayerSet(left, right) {
 function participantsAllUnready(snapshot) {
   const players = normalizePlayers(snapshot);
   return players.length > 0 && players.every((player) => player.ready !== true);
+}
+
+function snapshotMissingCurrentPlayer(snapshot) {
+  if (!appState.playerId || !Array.isArray(snapshot?.participants)) return false;
+  return !snapshot.participants.some((participant) => participant.player_id === appState.playerId);
 }
 
 function clearPendingAfterNoopResetDebounce(requestId) {
@@ -1159,6 +1286,7 @@ function setCommandPending(pending, rerender = true) {
   appState.commandPending = pending;
   if (rerender && appState.snapshot) {
     renderActions(appState.snapshot);
+    renderChatControls(appState.snapshot);
   }
 }
 

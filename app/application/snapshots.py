@@ -181,8 +181,9 @@ class SnapshotProjector:
             {
                 "message_id": cls._value(message, "message_id", ""),
                 "author_id": cls._value(message, "author_id", ""),
-                "author_display": cls._display(game, str(cls._value(message, "author_id", ""))),
+                "author_display": cls._value(message, "author_display", cls._display(game, str(cls._value(message, "author_id", "")))),
                 "text": cls._value(message, "text", ""),
+                "request_id": cls._value(message, "request_id", None),
                 "created_at": cls._value(message, "created_at", ""),
             }
             for message in list(chat_history or [])[-50:]

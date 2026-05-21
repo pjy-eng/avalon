@@ -1426,6 +1426,70 @@ body {
   letter-spacing: .04em;
 }
 
+.governance-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.governance-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 36px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--secondary);
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.governance-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.mini-btn {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+  color: var(--secondary-fg);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, color .15s, transform .1s;
+}
+.mini-btn:hover {
+  border-color: var(--gold);
+  color: var(--gold);
+}
+.mini-btn:active { transform: scale(.97); }
+.mini-btn:disabled {
+  opacity: .65;
+  cursor: not-allowed;
+  transform: none;
+}
+.mini-btn.danger {
+  border-color: rgba(184,48,48,.45);
+  color: var(--evil);
+}
+.mini-btn.danger:hover {
+  background: var(--destructive);
+  border-color: var(--evil);
+  color: var(--destructive-fg);
+}
+
 .reveal-list {
   display: flex;
   flex-direction: column;

@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, StringConstraints
 
+from app.api.ws import notify_room_after_command
 from app.application.rooms import Participant, RoomService
 from app.application.sessions import RoomSessionService, SessionError
 from app.application.snapshots import SnapshotProjector
@@ -86,6 +87,13 @@ async def room_command(room_id: str, payload: RoomCommandRequest, request: Reque
         else:
             status_code = 400
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    await notify_room_after_command(
+        connection_manager=request.app.state.connection_manager,
+        command_gateway=request.app.state.command_gateway,
+        room_service=request.app.state.room_service,
+        room_id=room_id,
+        result=result,
+    )
     return {
         "snapshot": result.snapshot,
         "events": [asdict(event) for event in result.events],

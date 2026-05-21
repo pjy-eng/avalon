@@ -30,8 +30,10 @@ class RequestRecord:
 @dataclass
 class ChatMessage:
     author_id: str
+    author_display: str
     text: str
-    message_id: str = field(default_factory=lambda: str(uuid4()))
+    request_id: str | None = None
+    message_id: str = field(default_factory=lambda: f"msg_{uuid4().hex[:12]}")
     created_at: str = field(default_factory=utc_now_iso)
 
 
@@ -196,6 +198,89 @@ class RoomService:
         room.events.append(event)
         return event
 
+    def add_chat_message(self, room_id: str, actor_id: str, text: str, request_id: str | None = None) -> ChatMessage:
+        room = self.get_room(room_id)
+        participant = self.get_participant(room, actor_id)
+        trimmed_text = text.strip()
+        if not trimmed_text:
+            raise CommandError("消息不能为空。")
+        if len(trimmed_text) > 300:
+            raise CommandError("消息不能超过 300 字。")
+
+        message = ChatMessage(
+            message_id=f"msg_{uuid4().hex[:12]}",
+            author_id=actor_id,
+            author_display=f"{participant.seat}号-{participant.nickname}",
+            text=trimmed_text,
+            request_id=request_id,
+            created_at=utc_now_iso(),
+        )
+        room.chat_history.append(message)
+        room.chat_history = room.chat_history[-100:]
+        return message
+
+    def kick_player(self, room_id: str, actor_id: str, target_id: str, request_id: str) -> AppEvent:
+        room = self.get_room(room_id)
+        self._require_lobby(room)
+        if actor_id != room.host_id:
+            raise CommandError("只有房主可以移除玩家。")
+        if actor_id == target_id:
+            raise CommandError("房主不能移除自己。")
+        target = self.get_participant(room, target_id)
+
+        room.participants = [participant for participant in room.participants if participant.player_id != target_id]
+        self._compact_seats(room)
+        event = AppEvent(
+            event_type="participant_kicked",
+            room_id=room.room_id,
+            actor_id=actor_id,
+            payload={"player_id": target.player_id, "target_id": target.player_id, "nickname": target.nickname},
+            request_id=request_id,
+        )
+        room.events.append(event)
+        return event
+
+    def transfer_host(self, room_id: str, actor_id: str, target_id: str, request_id: str) -> AppEvent:
+        room = self.get_room(room_id)
+        self._require_lobby(room)
+        if actor_id != room.host_id:
+            raise CommandError("只有房主可以转让房主。")
+        if actor_id == target_id:
+            raise CommandError("房主不能转让给自己。")
+        target = self.get_participant(room, target_id)
+
+        for participant in room.participants:
+            participant.is_host = participant.player_id == target.player_id
+        event = AppEvent(
+            event_type="host_transferred",
+            room_id=room.room_id,
+            actor_id=actor_id,
+            payload={"from_player_id": actor_id, "to_player_id": target.player_id},
+            request_id=request_id,
+        )
+        room.events.append(event)
+        return event
+
+    def leave_room(self, room_id: str, actor_id: str, request_id: str) -> AppEvent:
+        room = self.get_room(room_id)
+        self._require_lobby(room)
+        actor = self.get_participant(room, actor_id)
+        was_host = actor.is_host
+
+        room.participants = [participant for participant in room.participants if participant.player_id != actor_id]
+        if was_host and room.participants:
+            room.participants[0].is_host = True
+        self._compact_seats(room)
+        event = AppEvent(
+            event_type="participant_left",
+            room_id=room.room_id,
+            actor_id=actor_id,
+            payload={"player_id": actor.player_id, "nickname": actor.nickname},
+            request_id=request_id,
+        )
+        room.events.append(event)
+        return event
+
     def snapshot(
         self,
         room_id: str,
@@ -258,6 +343,16 @@ class RoomService:
             if player_id not in existing_ids:
                 return player_id
 
+    @staticmethod
+    def _require_lobby(room: Room) -> None:
+        if room.game is not None:
+            raise CommandError("游戏开始后不能执行该操作。")
+
+    @staticmethod
+    def _compact_seats(room: Room) -> None:
+        for seat, participant in enumerate(sorted(room.participants, key=lambda item: item.seat), start=1):
+            participant.seat = seat
+
     def _you_payload(self, room: Room, viewer_id: str | None) -> dict[str, Any] | None:
         if viewer_id is None:
             return None
@@ -307,8 +402,13 @@ class RoomService:
             {
                 "message_id": self._message_value(message, "message_id", ""),
                 "author_id": self._message_value(message, "author_id", ""),
-                "author_display": self._display_name(room, str(self._message_value(message, "author_id", ""))),
+                "author_display": self._message_value(
+                    message,
+                    "author_display",
+                    self._display_name(room, str(self._message_value(message, "author_id", ""))),
+                ),
                 "text": self._message_value(message, "text", ""),
+                "request_id": self._message_value(message, "request_id", None),
                 "created_at": self._message_value(message, "created_at", ""),
             }
             for message in room.chat_history[-50:]

@@ -9,7 +9,7 @@ from app.application.rooms import JoinResult, RequestRecord, Room, RoomService
 from app.application.sessions import RoomSessionService
 from app.application.snapshots import SnapshotProjector
 from app.domain.game import AvalonGame
-from app.domain.types import CommandError
+from app.domain.types import CommandError, Phase
 
 
 @dataclass(frozen=True)
@@ -59,6 +59,29 @@ class CommandGateway:
             result = self._handle_ready(room_id=room.room_id, actor_id=participant.player_id, request_id=request_id, command=command)
         elif command_type == "reset":
             result = self._handle_reset(room_id=room.room_id, actor_id=participant.player_id, request_id=request_id)
+        elif command_type == "send_chat":
+            result = self._handle_send_chat(
+                room_id=room.room_id,
+                actor_id=participant.player_id,
+                request_id=request_id,
+                command=command,
+            )
+        elif command_type == "kick_player":
+            result = self._handle_kick_player(
+                room_id=room.room_id,
+                actor_id=participant.player_id,
+                request_id=request_id,
+                command=command,
+            )
+        elif command_type == "transfer_host":
+            result = self._handle_transfer_host(
+                room_id=room.room_id,
+                actor_id=participant.player_id,
+                request_id=request_id,
+                command=command,
+            )
+        elif command_type == "leave_room":
+            result = self._handle_leave_room(room_id=room.room_id, actor_id=participant.player_id, request_id=request_id)
         elif command_type == "select_team":
             result = self._handle_select_team(
                 room_id=room.room_id,
@@ -118,6 +141,70 @@ class CommandGateway:
         event = self.room_service.reset(room_id=room_id, actor_id=actor_id, request_id=request_id)
         return CommandResult(
             snapshot=self._snapshot_for_actor(room_id, actor_id),
+            events=[event],
+        )
+
+    def _handle_send_chat(
+        self,
+        room_id: str,
+        actor_id: str,
+        request_id: str,
+        command: dict[str, Any],
+    ) -> CommandResult:
+        if not self._can_send_text(room_id):
+            raise CommandError("当前阶段禁止发言。")
+        text = self._string_payload(command, "text")
+        message = self.room_service.add_chat_message(
+            room_id=room_id,
+            actor_id=actor_id,
+            text=text,
+            request_id=request_id,
+        )
+        event = self._append_event(
+            room_id=room_id,
+            actor_id=actor_id,
+            event_type="chat_message_sent",
+            payload={"message_id": message.message_id},
+            request_id=request_id,
+        )
+        return CommandResult(snapshot=self._snapshot_for_actor(room_id, actor_id), events=[event])
+
+    def _handle_kick_player(
+        self,
+        room_id: str,
+        actor_id: str,
+        request_id: str,
+        command: dict[str, Any],
+    ) -> CommandResult:
+        target_id = self._string_payload(command, "target_id")
+        event = self.room_service.kick_player(
+            room_id=room_id,
+            actor_id=actor_id,
+            target_id=target_id,
+            request_id=request_id,
+        )
+        return CommandResult(snapshot=self._snapshot_for_actor(room_id, actor_id), events=[event])
+
+    def _handle_transfer_host(
+        self,
+        room_id: str,
+        actor_id: str,
+        request_id: str,
+        command: dict[str, Any],
+    ) -> CommandResult:
+        target_id = self._string_payload(command, "target_id")
+        event = self.room_service.transfer_host(
+            room_id=room_id,
+            actor_id=actor_id,
+            target_id=target_id,
+            request_id=request_id,
+        )
+        return CommandResult(snapshot=self._snapshot_for_actor(room_id, actor_id), events=[event])
+
+    def _handle_leave_room(self, room_id: str, actor_id: str, request_id: str) -> CommandResult:
+        event = self.room_service.leave_room(room_id=room_id, actor_id=actor_id, request_id=request_id)
+        return CommandResult(
+            snapshot=self.room_service.snapshot(room_id, viewer_id=None, online_counts=self._online_counts(room_id)),
             events=[event],
         )
 
@@ -332,6 +419,12 @@ class CommandGateway:
         if room.game is None:
             raise CommandError("游戏尚未开始。")
         return room.game
+
+    def _can_send_text(self, room_id: str) -> bool:
+        room = self.room_service.get_room(room_id)
+        if room.game is None:
+            return True
+        return room.game.phase not in {Phase.TEAM_VOTE, Phase.MISSION_VOTE}
 
     @staticmethod
     def _string_list_payload(command: dict[str, Any], key: str) -> list[str]:

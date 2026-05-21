@@ -128,6 +128,29 @@ def test_frontend_contains_enabled_gameplay_action_handlers():
         assert stale_label not in main_js
 
 
+def test_frontend_contains_chat_and_lobby_governance_handlers():
+    main_js = (REPO_ROOT / "static" / "main.js").read_text(encoding="utf-8")
+
+    for required in [
+        "handleBackButton",
+        "sendChatMessage",
+        "renderChatControls",
+        "appendGovernanceControls",
+        "phase(appState.snapshot) === \"LOBBY\" && appState.sessionToken",
+        "message.request_id === pending.requestId",
+        "message.author_id === pending.actorId",
+        "elements.chatInput.value.trim() === pending.command.text",
+        "消息不能超过 300 字。",
+        "transfer_host",
+        "kick_player",
+        "leave_room",
+        "send_chat",
+    ]:
+        assert required in main_js
+
+    assert "renderActions(appState.snapshot);\n      renderChatControls(appState.snapshot);" in main_js
+
+
 def test_missing_gameplay_doc_tracks_full_game_blockers():
     doc = (REPO_ROOT / "docs" / "MISSING_GAMEPLAY_FEATURES.md").read_text(encoding="utf-8")
 

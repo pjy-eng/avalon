@@ -34,6 +34,28 @@ class ConnectionManager:
         if not room_connections:
             self._rooms.pop(room_id, None)
 
+    async def disconnect_player(
+        self,
+        room_id: str,
+        player_id: str,
+        payload: dict[str, Any] | None = None,
+        code: int = 1000,
+    ) -> None:
+        room_connections = self._rooms.get(room_id)
+        if room_connections is None:
+            return
+        websockets = list(room_connections.pop(player_id, set()))
+        if not room_connections:
+            self._rooms.pop(room_id, None)
+
+        for websocket in websockets:
+            try:
+                if payload is not None:
+                    await websocket.send_json(payload)
+                await websocket.close(code=code)
+            except (RuntimeError, WebSocketDisconnect):
+                continue
+
     def online_counts(self, room_id: str) -> dict[str, int]:
         return {
             player_id: len(player_connections)

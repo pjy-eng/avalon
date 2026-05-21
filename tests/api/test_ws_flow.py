@@ -1,4 +1,6 @@
 from fastapi.testclient import TestClient
+import pytest
+from starlette.websockets import WebSocketDisconnect
 
 from app.config import Settings
 from app.main import create_app
@@ -193,6 +195,106 @@ def test_ws_broadcasts_per_player_state_after_command():
     assert host_payload["snapshot"]["you"]["player_id"] == joins[0]["player_id"]
     assert guest_payload["snapshot"]["you"]["player_id"] == joins[1]["player_id"]
     assert host_payload["snapshot"]["private_panel"] != guest_payload["snapshot"]["private_panel"]
+
+
+def test_ws_kicked_lobby_player_is_disconnected_before_later_broadcasts():
+    client = make_client()
+    joins = join_players(client, count=6)
+
+    with client.websocket_connect("/ws/ROOM1") as host_ws:
+        assert hello(host_ws, joins[0]["session_token"])["type"] == "state"
+        with client.websocket_connect("/ws/ROOM1") as guest_ws:
+            assert hello(guest_ws, joins[1]["session_token"])["type"] == "state"
+            assert host_ws.receive_json()["type"] == "state"
+
+            host_ws.send_json(
+                {
+                    "type": "command",
+                    "request_id": "kick-guest",
+                    "command": {"type": "kick_player", "target_id": joins[1]["player_id"]},
+                }
+            )
+            guest_payload = guest_ws.receive_json()
+            host_after_kick = host_ws.receive_json()
+
+            assert guest_payload["type"] == "removed"
+            assert guest_payload["reason"] == "participant_kicked"
+            assert host_after_kick["type"] == "state"
+            assert joins[1]["player_id"] not in {
+                item["player_id"] for item in host_after_kick["snapshot"]["participants"]
+            }
+
+            with pytest.raises(WebSocketDisconnect):
+                guest_ws.receive_json()
+
+            host_ws.send_json(
+                {
+                    "type": "command",
+                    "request_id": "ready-after-kick",
+                    "command": {"type": "ready", "ready": True},
+                }
+            )
+            host_after_ready = host_ws.receive_json()
+            host_ws.send_json(
+                {
+                    "type": "command",
+                    "request_id": "start-after-kick",
+                    "command": {"type": "start_game"},
+                }
+            )
+            host_after_start = host_ws.receive_json()
+
+    assert host_after_ready["type"] == "state"
+    assert host_after_start["type"] == "state"
+    assert host_after_start["snapshot"]["phase_summary"]["phase"] == "TEAM_PROPOSAL"
+
+
+def test_http_kick_disconnects_guest_ws_and_broadcasts_remaining_state():
+    client = make_client()
+    joins = join_players(client, count=6)
+
+    with client.websocket_connect("/ws/ROOM1") as guest_ws:
+        assert hello(guest_ws, joins[1]["session_token"])["type"] == "state"
+        with client.websocket_connect("/ws/ROOM1") as observer_ws:
+            assert hello(observer_ws, joins[2]["session_token"])["type"] == "state"
+            assert guest_ws.receive_json()["type"] == "state"
+
+            response = client.post(
+                "/api/rooms/ROOM1/command",
+                json={
+                    "session_token": joins[0]["session_token"],
+                    "request_id": "http-kick-guest",
+                    "command": {"type": "kick_player", "target_id": joins[1]["player_id"]},
+                },
+            )
+
+            assert response.status_code == 200
+            assert joins[1]["player_id"] not in client.app.state.connection_manager.online_counts("ROOM1")
+
+            guest_payload = guest_ws.receive_json()
+            observer_after_kick = observer_ws.receive_json()
+
+            assert guest_payload["type"] == "removed"
+            assert guest_payload["reason"] == "participant_kicked"
+            assert observer_after_kick["type"] == "state"
+            assert joins[1]["player_id"] not in {
+                item["player_id"] for item in observer_after_kick["snapshot"]["participants"]
+            }
+
+            with pytest.raises(WebSocketDisconnect):
+                guest_ws.receive_json()
+
+            observer_ws.send_json(
+                {
+                    "type": "command",
+                    "request_id": "observer-ready-after-http-kick",
+                    "command": {"type": "ready", "ready": True},
+                }
+            )
+            observer_after_ready = observer_ws.receive_json()
+
+    assert observer_after_ready["type"] == "state"
+    assert observer_after_ready["snapshot"]["you"]["player_id"] == joins[2]["player_id"]
 
 
 def test_ws_same_player_multiple_connections_receive_broadcasts_after_old_connection_closes():

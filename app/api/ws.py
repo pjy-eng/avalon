@@ -5,7 +5,8 @@ from typing import Any
 from fastapi import APIRouter, WebSocket
 from starlette.websockets import WebSocketDisconnect
 
-from app.application.commands import CommandGateway
+from app.application.commands import CommandGateway, CommandResult
+from app.application.events import AppEvent
 from app.application.rooms import RoomService
 from app.application.sessions import RoomSessionService, SessionError
 from app.domain.types import CommandError
@@ -55,10 +56,12 @@ async def room_websocket(websocket: WebSocket, room_id: str) -> None:
         connected = True
         await manager.broadcast_room(
             room.room_id,
-            payload_factory=lambda target_player_id: {
-                "type": "state",
-                "snapshot": command_gateway._snapshot_for_actor(room.room_id, target_player_id),
-            },
+            payload_factory=lambda target_player_id: _state_payload_for_player(
+                command_gateway,
+                room_service,
+                room.room_id,
+                target_player_id,
+            ),
         )
 
         while True:
@@ -69,6 +72,7 @@ async def room_websocket(websocket: WebSocket, room_id: str) -> None:
                 session_token=session_token,
                 message=message,
                 command_gateway=command_gateway,
+                room_service=room_service,
                 connection_manager=manager,
             )
     except WebSocketDisconnect:
@@ -79,10 +83,12 @@ async def room_websocket(websocket: WebSocket, room_id: str) -> None:
             try:
                 await manager.broadcast_room(
                     connected_room_id,
-                    payload_factory=lambda target_player_id: {
-                        "type": "state",
-                        "snapshot": command_gateway._snapshot_for_actor(connected_room_id, target_player_id),
-                    },
+                    payload_factory=lambda target_player_id: _state_payload_for_player(
+                        command_gateway,
+                        room_service,
+                        connected_room_id,
+                        target_player_id,
+                    ),
                 )
             except CommandError as exc:
                 if str(exc) != ROOM_MISSING_ON_DISCONNECT_ERROR:
@@ -95,6 +101,7 @@ async def _handle_message(
     session_token: str,
     message: Any,
     command_gateway: CommandGateway,
+    room_service: RoomService,
     connection_manager: ConnectionManager,
 ) -> None:
     if not isinstance(message, dict):
@@ -121,7 +128,7 @@ async def _handle_message(
         return
 
     try:
-        command_gateway.handle_command(
+        result = command_gateway.handle_command(
             room_id=room_id,
             session_token=session_token,
             request_id=request_id,
@@ -131,13 +138,72 @@ async def _handle_message(
         await websocket.send_json({"type": "error", "message": str(exc)})
         return
 
+    await notify_room_after_command(
+        connection_manager=connection_manager,
+        command_gateway=command_gateway,
+        room_service=room_service,
+        room_id=room_id,
+        result=result,
+    )
+
+
+async def notify_room_after_command(
+    connection_manager: ConnectionManager,
+    command_gateway: CommandGateway,
+    room_service: RoomService,
+    room_id: str,
+    result: CommandResult,
+) -> None:
+    await _disconnect_removed_players(connection_manager, room_id, result)
     await connection_manager.broadcast_room(
         room_id,
-        payload_factory=lambda player_id: {
-            "type": "state",
-            "snapshot": command_gateway._snapshot_for_actor(room_id, player_id),
-        },
+        payload_factory=lambda player_id: _state_payload_for_player(command_gateway, room_service, room_id, player_id),
     )
+
+
+async def _disconnect_removed_players(
+    connection_manager: ConnectionManager,
+    room_id: str,
+    result: CommandResult,
+) -> None:
+    for event in result.events:
+        removed_player_id = _removed_player_id(event)
+        if removed_player_id is None:
+            continue
+        await connection_manager.disconnect_player(
+            room_id=room_id,
+            player_id=removed_player_id,
+            payload={
+                "type": "removed",
+                "reason": event.event_type,
+                "player_id": removed_player_id,
+            },
+        )
+
+
+def _removed_player_id(event: AppEvent) -> str | None:
+    if event.event_type == "participant_kicked":
+        value = event.payload.get("target_id") or event.payload.get("player_id")
+    elif event.event_type == "participant_left":
+        value = event.payload.get("player_id")
+    else:
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def _state_payload_for_player(
+    command_gateway: CommandGateway,
+    room_service: RoomService,
+    room_id: str,
+    player_id: str,
+) -> dict[str, Any] | None:
+    room = room_service.get_room(room_id)
+    if not any(participant.player_id == player_id for participant in room.participants):
+        return None
+    return {
+        "type": "state",
+        "snapshot": command_gateway._snapshot_for_actor(room_id, player_id),
+    }
 
 
 def _hello_session_token(message: Any) -> str | None:

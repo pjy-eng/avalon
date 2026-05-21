@@ -237,6 +237,142 @@ def test_repeating_same_request_id_and_command_returns_snapshot_without_new_even
     assert participants[guest.player_id]["ready"] is True
 
 
+def test_send_chat_stores_trimmed_message_when_speaking_is_open():
+    gateway = make_gateway()
+    host = gateway.handle_join(room_id="ROOM1", nickname="房主")
+
+    result = gateway.handle_command(
+        room_id="ROOM1",
+        session_token=host.session_token,
+        command={"type": "send_chat", "text": "  大家准备一下  "},
+        request_id="chat-1",
+    )
+
+    assert result.snapshot["chat_history"][-1]["text"] == "大家准备一下"
+    assert result.snapshot["chat_history"][-1]["author_id"] == host.player_id
+    assert result.snapshot["chat_history"][-1]["author_display"] == "1号-房主"
+    assert result.snapshot["chat_history"][-1]["request_id"] == "chat-1"
+    assert result.events[0].event_type == "chat_message_sent"
+
+
+def test_chat_author_display_survives_author_leaving_lobby():
+    gateway = make_gateway()
+    host = gateway.handle_join(room_id="ROOM1", nickname="房主")
+    guest = gateway.handle_join(room_id="ROOM1", nickname="玩家2")
+
+    gateway.handle_command(
+        room_id="ROOM1",
+        session_token=guest.session_token,
+        command={"type": "send_chat", "text": "我先撤"},
+        request_id="chat-before-leave",
+    )
+    result = gateway.handle_command(
+        room_id="ROOM1",
+        session_token=guest.session_token,
+        command={"type": "leave_room"},
+        request_id="guest-leave-after-chat",
+    )
+
+    assert [participant["player_id"] for participant in result.snapshot["participants"]] == [host.player_id]
+    assert result.snapshot["chat_history"][-1]["author_id"] == guest.player_id
+    assert result.snapshot["chat_history"][-1]["author_display"] == "2号-玩家2"
+    assert result.snapshot["chat_history"][-1]["request_id"] == "chat-before-leave"
+
+
+def test_send_chat_is_rejected_during_secret_vote_phase():
+    gateway = make_gateway()
+    joins = join_and_start(gateway)
+    game = current_game(gateway)
+    leader_join = next(join for join in joins if join.player_id == game.leader_id)
+    gateway.handle_command(
+        room_id="ROOM1",
+        session_token=leader_join.session_token,
+        command={"type": "select_team", "team": game.player_order[: game.required_team_size]},
+        request_id="select-team-before-muted-chat",
+    )
+
+    with pytest.raises(CommandError, match="当前阶段禁止发言"):
+        gateway.handle_command(
+            room_id="ROOM1",
+            session_token=leader_join.session_token,
+            command={"type": "send_chat", "text": "这轮我觉得可以过"},
+            request_id="chat-muted",
+        )
+
+
+def test_host_can_kick_lobby_player_and_old_token_stops_working():
+    gateway = make_gateway()
+    host = gateway.handle_join(room_id="ROOM1", nickname="房主")
+    guest = gateway.handle_join(room_id="ROOM1", nickname="玩家2")
+
+    result = gateway.handle_command(
+        room_id="ROOM1",
+        session_token=host.session_token,
+        command={"type": "kick_player", "target_id": guest.player_id},
+        request_id="kick-guest",
+    )
+
+    assert guest.player_id not in {participant["player_id"] for participant in result.snapshot["participants"]}
+    with pytest.raises(CommandError, match="当前会话不属于该房间玩家"):
+        gateway.handle_command(
+            room_id="ROOM1",
+            session_token=guest.session_token,
+            command={"type": "ready", "ready": True},
+            request_id="guest-old-token",
+        )
+
+
+def test_host_can_transfer_host_in_lobby():
+    gateway = make_gateway()
+    host = gateway.handle_join(room_id="ROOM1", nickname="房主")
+    guest = gateway.handle_join(room_id="ROOM1", nickname="玩家2")
+
+    result = gateway.handle_command(
+        room_id="ROOM1",
+        session_token=host.session_token,
+        command={"type": "transfer_host", "target_id": guest.player_id},
+        request_id="transfer-host",
+    )
+
+    participants = {participant["player_id"]: participant for participant in result.snapshot["participants"]}
+    assert result.snapshot["room"]["host_id"] == guest.player_id
+    assert participants[host.player_id]["is_host"] is False
+    assert participants[guest.player_id]["is_host"] is True
+
+
+def test_host_cannot_transfer_host_to_self_in_lobby():
+    gateway = make_gateway()
+    host = gateway.handle_join(room_id="ROOM1", nickname="房主")
+
+    with pytest.raises(CommandError, match="不能转让给自己"):
+        gateway.handle_command(
+            room_id="ROOM1",
+            session_token=host.session_token,
+            command={"type": "transfer_host", "target_id": host.player_id},
+            request_id="transfer-self",
+        )
+
+
+def test_player_can_leave_lobby_and_seats_are_compacted():
+    gateway = make_gateway()
+    host = gateway.handle_join(room_id="ROOM1", nickname="房主")
+    guest = gateway.handle_join(room_id="ROOM1", nickname="玩家2")
+    third = gateway.handle_join(room_id="ROOM1", nickname="玩家3")
+
+    result = gateway.handle_command(
+        room_id="ROOM1",
+        session_token=guest.session_token,
+        command={"type": "leave_room"},
+        request_id="guest-leave",
+    )
+
+    assert [participant["player_id"] for participant in result.snapshot["participants"]] == [
+        host.player_id,
+        third.player_id,
+    ]
+    assert [participant["seat"] for participant in result.snapshot["participants"]] == [1, 2]
+
+
 def test_select_team_command_moves_to_team_vote_and_records_event():
     gateway = make_gateway()
     joins = join_and_start(gateway)
