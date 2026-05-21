@@ -27,10 +27,11 @@ from avalon_engine import AvalonGame, Phase
 
 
 MAX_CHAT_HISTORY = 120
-HEARTBEAT_INTERVAL = 5
-CLIENT_TIMEOUT = 15
-ROOM_TTL_SECONDS = 300
-ROOM_PERSIST_TTL_SECONDS = 60 * 60 * 6
+HEARTBEAT_INTERVAL = 8        # 每 8 秒服务端 ping 一次
+CLIENT_TIMEOUT = 90           # 玩家断线 90 秒内保留座位，不踢出
+GRACE_KICK_SECONDS = 90       # 断线宽限（同上，语义更清晰）
+ROOM_TTL_SECONDS = 600        # 空房间 10 分钟回收
+ROOM_PERSIST_TTL_SECONDS = 60 * 60 * 12  # Redis 持久化 12 小时
 WS_SEND_TIMEOUT = 3
 
 
@@ -57,6 +58,7 @@ class Room:
     expire_at: Optional[float] = None
     game_seq: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _pending_save: bool = False
 
     def player_order(self) -> List[str]:
         return [pid for pid, _p in sorted(self.players.items(), key=lambda kv: kv[1].seat)]
@@ -586,10 +588,18 @@ def redis_key(room_id: str) -> str:
 
 
 def serialize_room(room: Room) -> Dict[str, Any]:
+    """Serialize full room state for Redis persistence.
+
+    Called after every meaningful state mutation so a server restart or
+    re-deploy can recover the game exactly where it left off.
+    """
     return {
         "room_id": room.room_id,
         "host_id": room.host_id,
-        "players": {pid: {"id": p.id, "name": p.name, "seat": p.seat, "connected": p.connected} for pid, p in room.players.items()},
+        "players": {
+            pid: {"id": p.id, "name": p.name, "seat": p.seat, "connected": False}
+            for pid, p in room.players.items()
+        },
         "ready_ids": list(room.ready_ids),
         "game": room.game.to_dict() if room.game else None,
         "chat_history": room.chat_history[-MAX_CHAT_HISTORY:],
@@ -635,14 +645,21 @@ async def load_room_from_redis(room_id: str) -> Optional[Room]:
 
 
 async def save_room(room: Room) -> None:
+    """Persist room to Redis. Always called after state mutations.
+
+    Fire-and-forget pattern: errors are logged but never propagate to
+    the WebSocket handler so a Redis hiccup cannot crash an in-progress game.
+    """
     if not redis_client:
         return
     try:
-        await redis_client.setex(
-            redis_key(room.room_id),
-            ROOM_PERSIST_TTL_SECONDS,
-            json.dumps(serialize_room(room), ensure_ascii=False),
+        payload = json.dumps(serialize_room(room), ensure_ascii=False)
+        await asyncio.wait_for(
+            redis_client.setex(redis_key(room.room_id), ROOM_PERSIST_TTL_SECONDS, payload),
+            timeout=2.0,
         )
+    except asyncio.TimeoutError:
+        print(f"[redis] save room {room.room_id} timed out, skipping")
     except Exception as exc:
         print(f"[redis] save room {room.room_id} failed: {exc}")
 
@@ -670,18 +687,46 @@ async def get_room(room_id: str, create: bool = False) -> Optional[Room]:
 
 
 async def room_cleanup_loop() -> None:
+    """Background task that:
+    1. Evicts players who have been disconnected > CLIENT_TIMEOUT seconds
+       (only in LOBBY; in-game seats are preserved until game ends or reset).
+    2. Removes rooms that have been empty > ROOM_TTL_SECONDS.
+    """
     while True:
-        await asyncio.sleep(30)
+        await asyncio.sleep(20)
         now = time.time()
         for room_id, room in list(rooms.items()):
             async with room.lock:
-                if room.sockets:
+                # Evict long-disconnected LOBBY players to free up seats.
+                if not room.game:
+                    evict = [
+                        pid for pid, ts in room.disconnected_at.items()
+                        if now - ts > CLIENT_TIMEOUT
+                    ]
+                    for pid in evict:
+                        room.players.pop(pid, None)
+                        room.sockets.pop(pid, None)
+                        room.ready_ids.discard(pid)
+                        room.speaking_ids.discard(pid)
+                        room.disconnected_at.pop(pid, None)
+                        room.last_seen.pop(pid, None)
+                    if evict:
+                        # Re-pack seat numbers
+                        for idx, pid in enumerate(room.player_order(), start=1):
+                            room.players[pid].seat = idx
+
+                # Room expiry: only when truly empty (no sockets AND no players).
+                has_connections = bool(room.sockets)
+                has_players = bool(room.players)
+                if has_connections:
                     room.expire_at = None
                     continue
-                if not room.expire_at:
-                    room.expire_at = now + ROOM_TTL_SECONDS
-                if room.expire_at and now >= room.expire_at:
-                    rooms.pop(room_id, None)
+                if not has_players:
+                    if not room.expire_at:
+                        room.expire_at = now + ROOM_TTL_SECONDS
+                    if now >= room.expire_at:
+                        rooms.pop(room_id, None)
+                        asyncio.create_task(delete_room_from_redis(room_id))
 
 
 def require_game(room: Room) -> None:

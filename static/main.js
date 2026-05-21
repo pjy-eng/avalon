@@ -60,10 +60,12 @@ let connectingWs = false;
 let reconnecting = false;
 let reconnectAttempt = 0;
 let lastWsMessageAt = Date.now();
-const HEARTBEAT_MS = 5000;
-const WS_TIMEOUT_MS = 15000;
-const RECONNECT_BASE_MS = 800;
-const RECONNECT_MAX_MS = 5000;
+let appVisibilityHidden = false;      // true while tab/app is in background
+const HEARTBEAT_MS = 8000;            // match server HEARTBEAT_INTERVAL
+const WS_TIMEOUT_MS = 95000;          // slightly > server CLIENT_TIMEOUT (90s)
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 12000;       // max 12 s between retries
+const RECONNECT_MAX_ATTEMPTS = 20;    // give up showing error after this many
 let localAudioContext = null;
 let localAnalyser = null;
 let speakingWatchTimer = null;
@@ -199,7 +201,8 @@ function startHeartbeat() {
       scheduleReconnect("连接已断开，正在自动重连……");
       return;
     }
-    if (now - lastWsMessageAt > WS_TIMEOUT_MS) {
+    // Skip timeout check while the app is backgrounded to avoid false disconnects
+    if (!appVisibilityHidden && now - lastWsMessageAt > WS_TIMEOUT_MS) {
       try { ws.close(); } catch (_) {}
       scheduleReconnect("连接超时，正在自动重连……");
       return;
@@ -215,15 +218,19 @@ function stopHeartbeat() {
 function scheduleReconnect(message) {
   if (!shouldReconnect || reconnecting) return;
   reconnecting = true;
-  showTopError(message || "连接正在恢复……");
-  stopHeartbeat();
-  const delay = Math.min(RECONNECT_BASE_MS * Math.pow(1.6, reconnectAttempt), RECONNECT_MAX_MS);
+  // Jitter ±20% to avoid thundering-herd when multiple clients reconnect at once
+  const base = Math.min(RECONNECT_BASE_MS * Math.pow(1.7, reconnectAttempt), RECONNECT_MAX_MS);
+  const jitter = base * (0.8 + Math.random() * 0.4);
   reconnectAttempt += 1;
+  if (reconnectAttempt <= RECONNECT_MAX_ATTEMPTS) {
+    showTopError(message || "连接正在恢复……");
+  }
+  stopHeartbeat();
   clearTimeout(reconnectTimer);
   reconnectTimer = setTimeout(() => {
     reconnecting = false;
     connectWebSocket();
-  }, delay);
+  }, jitter);
 }
 
 function handleSocketMessage(msg) {
@@ -257,6 +264,11 @@ let activeModalId = null;
 let roleModalAutoShownForSession = null;
 let roleCardFlipped = false;
 let gameOverRevealShownForSession = null;
+// Diff-cache: track last rendered values to skip no-op DOM updates
+let _lastChatKey = "";
+let _lastPlayerKey = "";
+let _lastActionKey = "";
+let _lastAnnouncementKey = "";
 const MARKS = ["好","坏","梅","派","莫","刺"];
 
 window.addEventListener("load", () => {
@@ -264,9 +276,27 @@ window.addEventListener("load", () => {
   $("openInfoBtn")?.addEventListener("click", openInfoModal);
   $("infoMiniBtn")?.addEventListener("click", openInfoModal);
   $("openHistoryBtn")?.addEventListener("click", openHistoryModal);
-  $("modalBackdrop")?.addEventListener("click", closeModal);
-  document.querySelectorAll("[data-close-modal]").forEach(btn => btn.addEventListener("click", closeModal));
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+  $("modalBackdrop")?.addEventListener("click", () => closeModal({ force: false }));
+  document.querySelectorAll("[data-close-modal]").forEach(btn => btn.addEventListener("click", () => closeModal({ force: true })));
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal({ force: false }); });
+
+  // ── Page Visibility: pause WS timeout while app is backgrounded ──
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      appVisibilityHidden = true;
+      // Freeze the "last seen" clock so we don't false-trigger timeout
+      lastWsMessageAt = Date.now();
+    } else {
+      appVisibilityHidden = false;
+      lastWsMessageAt = Date.now();
+      // If WS dropped while hidden, reconnect immediately
+      if (shouldReconnect && (!ws || ws.readyState !== WebSocket.OPEN)) {
+        reconnecting = false;
+        clearTimeout(reconnectTimer);
+        connectWebSocket();
+      }
+    }
+  });
 });
 
 function render(payload) {
@@ -279,7 +309,11 @@ function render(payload) {
   $("roomCode").textContent = payload.room_id;
   $("phaseTitle").textContent = compactPhaseName(state.current_phase, signal.round);
   renderScore(signal.game_score || {good:0, evil:0});
-  $("announcementText").innerHTML = buildAnnouncementHTML(state);
+  const annHtml = buildAnnouncementHTML(state);
+  if (annHtml !== _lastAnnouncementKey) {
+    _lastAnnouncementKey = annHtml;
+    $("announcementText").innerHTML = annHtml;
+  }
   applyPhaseMicroInteractions(state, signal);
   $("permissionText").textContent = permissionSummary(perms, state.current_phase);
   $("chatStatusText").textContent = perms.can_chat ? "可打字" : "暂不可打字";
@@ -332,20 +366,38 @@ function hasPrimaryAction(perms) {
 }
 
 function renderScore(score) {
-  $("scoreText").innerHTML = `<span class="good-score">正义 ${score.good ?? 0}</span> : <span class="evil-score">邪恶 ${score.evil ?? 0}</span>`;
+  const el = $("scoreText");
+  const newHtml = `<span class="good-score">正义 ${score.good ?? 0}</span> : <span class="evil-score">邪恶 ${score.evil ?? 0}</span>`;
+  if (el.innerHTML !== newHtml) {
+    el.innerHTML = newHtml;
+    el.classList.remove("score-flash");
+    void el.offsetWidth;
+    el.classList.add("score-flash");
+  }
 }
 
 function renderPlayers(players, signal, you) {
   $("playerCountText").textContent = `${players.length}/10`;
   const oddWrap = $("oddPlayersList") || $("playersList");
   const evenWrap = $("evenPlayersList") || $("playersList");
-  if (oddWrap) oddWrap.innerHTML = "";
-  if (evenWrap && evenWrap !== oddWrap) evenWrap.innerHTML = "";
-  const bySeat = new Map(players.map(p => [Number(p.seat), p]));
+
+  // Build fingerprint to skip full re-render when nothing changed
+  const marks = getPrivateMarks();
   const active = signal.active_speaker_id;
   const teamIds = new Set(signal.current_team_ids || []);
   const onlyMicSeat = onlyMicSeatFromStatus(signal.mic_status, players);
-  const marks = getPrivateMarks();
+  const bySeat = new Map(players.map(p => [Number(p.seat), p]));
+  const canKick = currentPayload?.state?.permissions?.can_kick;
+
+  const playerKey = players.map(p => {
+    const isSpeaking = p.is_speaking || p.id === active || (onlyMicSeat && p.seat === onlyMicSeat);
+    return `${p.id}:${p.name}:${p.connected}:${p.is_host}:${p.is_ready}:${p.id === signal.leader_id}:${isSpeaking}:${teamIds.has(p.id)}:${marks[p.id] || ""}`;
+  }).join("|") + "|" + signal.leader_id + "|" + you.id + "|" + (latestState?.current_phase || "") + "|" + (canKick ? "k" : "");
+  if (playerKey === _lastPlayerKey) return;
+  _lastPlayerKey = playerKey;
+
+  if (oddWrap) oddWrap.innerHTML = "";
+  if (evenWrap && evenWrap !== oddWrap) evenWrap.innerHTML = "";
   for (let seat = 1; seat <= 10; seat++) {
     const p = bySeat.get(seat);
     const card = document.createElement("article");
@@ -404,6 +456,11 @@ function renderActions(payload) {
   const perms = state.permissions || {};
   const signal = state.control_signal || {};
   const area = $("actionArea");
+  // Lightweight key: if permissions + phase haven't changed, skip re-render
+  const actionKey = state.current_phase + "|" + JSON.stringify(perms) + "|" + (signal.leader_id || "") + "|" + (signal.required_team_size || "") + "|" + (signal.current_team_ids || []).join(",");
+  if (actionKey === _lastActionKey && !area.__forceRefresh) return;
+  _lastActionKey = actionKey;
+  area.__forceRefresh = false;
   area.innerHTML = "";
 
   if (state.current_phase === "LOBBY") {
@@ -536,22 +593,30 @@ function renderHistory(state) {
 
 function renderChat(messages, canChat) {
   const preview = $("chatMessages");
-  preview.innerHTML = "";
   const visibleMessages = messages.slice(-80);
+  // Build a lightweight fingerprint; only re-render DOM when content changed
+  const chatKey = (visibleMessages.length ? visibleMessages[visibleMessages.length - 1]?.time : "") + "|" + visibleMessages.length + "|" + canChat;
+  const inputEl = $("chatInput");
+  const sendEl = $("sendChatBtn");
+  inputEl.disabled = !canChat;
+  sendEl.disabled = !canChat;
+  inputEl.placeholder = canChat ? "输入消息…" : "暂不可打字";
+  if (chatKey === _lastChatKey) return;  // no change, skip re-render
+  _lastChatKey = chatKey;
+  preview.innerHTML = "";
   if (!visibleMessages.length) {
     preview.innerHTML = `<div class="line muted">暂无文字消息。</div>`;
   } else {
+    const frag = document.createDocumentFragment();
     for (const m of visibleMessages) {
       const div = document.createElement("div");
       div.className = "line";
       if (m.type === "system") div.innerHTML = `<span class="chat-system-preview">系统：</span>${escapeHtml(m.text)}`;
       else div.innerHTML = `<span class="chat-name ${m.seat===2?'hostline':''}">${escapeHtml(`${m.seat}号-${m.name}`)}：</span>${escapeHtml(m.text)}`;
-      preview.appendChild(div);
+      frag.appendChild(div);
     }
+    preview.appendChild(frag);
   }
-  $("chatInput").disabled = !canChat;
-  $("sendChatBtn").disabled = !canChat;
-  $("chatInput").placeholder = canChat ? "输入消息..." : "暂不可打字";
   preview.scrollTop = preview.scrollHeight;
 }
 
@@ -564,23 +629,53 @@ function teamSummaryBlock(signal, title) {
 }
 
 function openModal(id) {
+  // Close any existing sheet without animation (switching modals)
+  document.querySelectorAll(".modal-sheet:not(.hidden)").forEach(m => {
+    m.classList.add("hidden");
+    m.classList.remove("modal-exiting");
+  });
   activeModalId = id;
-  document.querySelectorAll(".modal-sheet").forEach(m => m.classList.add("hidden"));
   $("modalBackdrop").classList.remove("hidden");
-  $(id).classList.remove("hidden");
+  const el = $(id);
+  if (!el) return;
+  el.classList.remove("hidden", "modal-exiting");
+  // Force reflow so the CSS transition triggers from the hidden state
+  void el.offsetWidth;
   document.querySelectorAll(".nav-btn").forEach(btn => btn.classList.remove("active"));
-  if (id === "tagsModal") $("openTagsBtn")?.classList.add("active");
-  if (id === "infoModal") $("openInfoBtn")?.classList.add("active");
+  if (id === "tagsModal")   $("openTagsBtn")?.classList.add("active");
+  if (id === "infoModal")   $("openInfoBtn")?.classList.add("active");
   if (id === "historyModal") $("openHistoryBtn")?.classList.add("active");
 }
-function closeModal() {
+
+function closeModal(opts = {}) {
+  // GAME_OVER reveal: only allow explicit close, block backdrop / ESC
+  const isReveal = activeModalId === "roleModal" && latestState?.current_phase === "GAME_OVER";
+  if (isReveal && !opts.force) return;
+
+  const closingId = activeModalId;
   activeModalId = null;
-  $("modalBackdrop").classList.add("hidden");
-  document.querySelectorAll(".modal-sheet").forEach(m => m.classList.add("hidden"));
+
+  // Animate backdrop out
+  const backdrop = $("modalBackdrop");
+  backdrop.classList.add("hidden");
+
+  // Animate sheet out (exit class), then truly hide
+  document.querySelectorAll(".modal-sheet:not(.hidden)").forEach(m => {
+    m.classList.add("modal-exiting");
+    const done = () => {
+      m.classList.add("hidden");
+      m.classList.remove("modal-exiting");
+    };
+    // Fallback: always hide after 300ms even if transitionend misfires
+    const timer = setTimeout(done, 280);
+    m.addEventListener("transitionend", () => { clearTimeout(timer); done(); }, { once: true });
+  });
+
   document.querySelectorAll(".nav-btn").forEach(btn => btn.classList.remove("active"));
-  if (latestState?.current_phase === "GAME_OVER") {
+
+  if (!isReveal && latestState?.current_phase === "GAME_OVER") {
     maybeAutoOpenRevealModal(latestState);
-  } else {
+  } else if (!isReveal) {
     maybeAutoOpenRoleModal(latestState || {});
   }
 }
@@ -644,6 +739,14 @@ function renderRoleModal() {
     front?.classList.remove("hidden", "flip-out");
     back?.classList.remove("flip-in");
   });
+  // GAME_OVER reveal: change close button to explicit "我看清楚了" label
+  if (latestState?.current_phase === "GAME_OVER" && (revealRolesCache || []).length) {
+    const closeBtn = $("roleModal")?.querySelector(".modal-close");
+    if (closeBtn) {
+      closeBtn.textContent = "我看清楚了 ✓";
+      closeBtn.style.cssText = "width:auto;padding:0 14px;font-size:13px;font-weight:900;color:#b2f0c8;border-color:rgba(82,200,122,.35);background:rgba(82,200,122,.1);";
+    }
+  }
 }
 
 function maybeAutoOpenRoleModal(state) {
