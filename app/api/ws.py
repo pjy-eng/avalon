@@ -14,6 +14,9 @@ from app.realtime import ConnectionManager
 router = APIRouter()
 
 HELLO_SESSION_TOKEN_ERROR = "第一条消息必须包含 session_token。"
+REQUEST_ID_REQUIRED_ERROR = "request_id 不能为空。"
+REQUEST_ID_TYPE_ERROR = "request_id 必须是字符串。"
+REQUEST_ID_TOO_LONG_ERROR = "request_id 长度不能超过 128。"
 
 
 @router.websocket("/ws/{room_id}")
@@ -93,9 +96,9 @@ async def _handle_message(
         await websocket.send_json({"type": "error", "message": "未知消息类型。"})
         return
 
-    request_id = str(message.get("request_id") or "").strip()
-    if not request_id:
-        await websocket.send_json({"type": "error", "message": "request_id 不能为空。"})
+    request_id, request_id_error = _command_request_id(message)
+    if request_id_error is not None:
+        await websocket.send_json({"type": "error", "message": request_id_error})
         return
 
     command = message.get("command")
@@ -130,6 +133,19 @@ def _hello_session_token(message: Any) -> str | None:
         return None
     session_token = str(message.get("session_token") or "").strip()
     return session_token or None
+
+
+def _command_request_id(message: dict[str, Any]) -> tuple[str | None, str | None]:
+    request_id = message.get("request_id")
+    if not isinstance(request_id, str):
+        return None, REQUEST_ID_TYPE_ERROR
+
+    normalized_request_id = request_id.strip()
+    if not normalized_request_id:
+        return None, REQUEST_ID_REQUIRED_ERROR
+    if len(normalized_request_id) > 128:
+        return None, REQUEST_ID_TOO_LONG_ERROR
+    return normalized_request_id, None
 
 
 async def _send_error_and_close(websocket: WebSocket, message: str) -> None:

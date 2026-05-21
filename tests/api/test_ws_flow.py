@@ -23,6 +23,13 @@ def hello(websocket, session_token: str) -> dict:
     return websocket.receive_json()
 
 
+def assert_player_not_ready_and_no_seen_request_ids(client: TestClient, room_id: str, player_id: str) -> None:
+    room = client.app.state.room_service.get_room(room_id)
+    participant = next(item for item in room.participants if item.player_id == player_id)
+    assert participant.ready is False
+    assert room.seen_request_ids == {}
+
+
 def test_ws_first_message_requires_session_token():
     client = make_client()
 
@@ -105,9 +112,51 @@ def test_ws_blank_request_id_does_not_enter_gateway_or_change_ready_state():
 
     assert payload["type"] == "error"
     assert payload["message"]
-    snapshot = client.app.state.room_service.snapshot("ROOM1", viewer_id=join["player_id"])
-    participant = next(item for item in snapshot["participants"] if item["player_id"] == join["player_id"])
-    assert participant["ready"] is False
+    assert_player_not_ready_and_no_seen_request_ids(client, "ROOM1", join["player_id"])
+
+
+def test_ws_long_request_id_does_not_enter_gateway_or_change_ready_state():
+    client = make_client()
+    join = client.post("/api/rooms/ROOM1/join", json={"nickname": "阿澈"}).json()
+
+    with client.websocket_connect("/ws/ROOM1") as websocket:
+        assert hello(websocket, join["session_token"])["type"] == "state"
+
+        websocket.send_json(
+            {
+                "type": "command",
+                "request_id": "x" * 129,
+                "command": {"type": "ready", "ready": True},
+            }
+        )
+
+        payload = websocket.receive_json()
+
+    assert payload["type"] == "error"
+    assert payload["message"]
+    assert_player_not_ready_and_no_seen_request_ids(client, "ROOM1", join["player_id"])
+
+
+def test_ws_non_string_request_id_does_not_enter_gateway_or_change_ready_state():
+    client = make_client()
+    join = client.post("/api/rooms/ROOM1/join", json={"nickname": "阿澈"}).json()
+
+    with client.websocket_connect("/ws/ROOM1") as websocket:
+        assert hello(websocket, join["session_token"])["type"] == "state"
+
+        websocket.send_json(
+            {
+                "type": "command",
+                "request_id": 123,
+                "command": {"type": "ready", "ready": True},
+            }
+        )
+
+        payload = websocket.receive_json()
+
+    assert payload["type"] == "error"
+    assert payload["message"]
+    assert_player_not_ready_and_no_seen_request_ids(client, "ROOM1", join["player_id"])
 
 
 def test_ws_broadcasts_per_player_state_after_command():
