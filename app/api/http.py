@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, StringConstraints
 
 from app.application.rooms import Participant, RoomService
 from app.application.sessions import RoomSessionService, SessionError
@@ -17,19 +17,23 @@ from app.paths import STATIC_DIR
 
 router = APIRouter()
 
+StrippedNonEmpty = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+RequestId = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
+MISSING_PARTICIPANT_MESSAGE = "当前会话不属于该房间玩家。"
+
 
 class JoinRoomRequest(BaseModel):
-    nickname: str
+    nickname: StrippedNonEmpty
 
 
 class RoomCommandRequest(BaseModel):
-    session_token: str
-    request_id: str
+    session_token: StrippedNonEmpty
+    request_id: RequestId
     command: dict[str, Any]
 
 
 class VoiceTokenRequest(BaseModel):
-    session_token: str
+    session_token: StrippedNonEmpty
 
 
 @router.get("/health")
@@ -75,7 +79,12 @@ async def room_command(room_id: str, payload: RoomCommandRequest, request: Reque
     except SessionError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except CommandError as exc:
-        status_code = 403 if "只有房主" in str(exc) else 400
+        if str(exc) == MISSING_PARTICIPANT_MESSAGE:
+            status_code = 401
+        elif "只有房主" in str(exc):
+            status_code = 403
+        else:
+            status_code = 400
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
     return {
         "snapshot": result.snapshot,
@@ -97,7 +106,8 @@ async def voice_token(room_id: str, payload: VoiceTokenRequest, request: Request
     except SessionError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except CommandError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        status_code = 401 if str(exc) == MISSING_PARTICIPANT_MESSAGE else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
     can_publish_audio = True
     if room.game is not None:
