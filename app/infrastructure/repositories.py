@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.application.events import AppEvent
@@ -12,11 +12,9 @@ class EventRepository:
         self.session = session
 
     def append(self, event: AppEvent) -> None:
-        next_record_id = self.session.scalar(select(func.max(EventRecord.record_id))) or 0
         self.session.add(
             EventRecord(
                 event_id=event.event_id,
-                record_id=next_record_id + 1,
                 event_type=event.event_type,
                 room_id=event.room_id,
                 actor_id=event.actor_id,

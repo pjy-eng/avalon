@@ -18,8 +18,8 @@ class Base(DeclarativeBase):
 class EventRecord(Base):
     __tablename__ = "game_events"
 
-    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    record_id: Mapped[int] = mapped_column(Integer, unique=True, index=True, nullable=False)
+    record_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
     event_type: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
     room_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     actor_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -34,6 +34,8 @@ class EventRecord(Base):
 
 
 def make_engine(database_url: str) -> Engine:
+    if database_url.startswith("postgresql://"):
+        database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
     return create_engine(database_url, future=True)
 
 

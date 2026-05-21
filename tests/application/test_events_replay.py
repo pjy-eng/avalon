@@ -1,12 +1,14 @@
 import pytest
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.application.events import AppEvent
-from app.infrastructure.db import create_schema, make_engine, session_scope
+from app.infrastructure.db import EventRecord, create_schema, make_engine, session_scope
 from app.infrastructure.repositories import EventRepository
 
 
-def make_test_engine():
-    engine = make_engine("sqlite+pysqlite:///:memory:")
+def make_test_engine(database_url: str = "sqlite+pysqlite:///:memory:"):
+    engine = make_engine(database_url)
     create_schema(engine)
     return engine
 
@@ -97,3 +99,50 @@ def test_session_scope_rolls_back_appended_events_on_exception():
             raise RuntimeError("boom")
 
     assert list_room_events(engine, "ROOM1") == []
+
+
+def test_database_assigns_record_ids_across_independent_sessions(tmp_path):
+    engine = make_test_engine(f"sqlite+pysqlite:///{tmp_path / 'events.db'}")
+    first_event = AppEvent(
+        event_type="command.join_room",
+        room_id="ROOM1",
+        actor_id="p1",
+        request_id="req-first",
+        payload={"nickname": "玩家1"},
+    )
+    second_event = AppEvent(
+        event_type="command.join_room",
+        room_id="ROOM1",
+        actor_id="p2",
+        request_id="req-second",
+        payload={"nickname": "玩家2"},
+    )
+    first_session = Session(engine)
+    second_session = Session(engine)
+
+    try:
+        EventRepository(first_session).append(first_event)
+        EventRepository(second_session).append(second_event)
+
+        first_session.commit()
+        second_session.commit()
+    finally:
+        first_session.close()
+        second_session.close()
+
+    with session_scope(engine) as session:
+        records = session.scalars(select(EventRecord).order_by(EventRecord.record_id)).all()
+        persisted_ids = [(record.record_id, record.event_id) for record in records]
+
+    assert persisted_ids == [
+        (1, first_event.event_id),
+        (2, second_event.event_id),
+    ]
+    assert list_room_events(engine, "ROOM1") == [first_event, second_event]
+
+
+def test_make_engine_uses_psycopg_for_plain_postgresql_urls():
+    engine = make_engine("postgresql://user:pass@localhost:5432/avalon")
+
+    assert engine.url.drivername == "postgresql+psycopg"
+    assert engine.dialect.driver == "psycopg"
