@@ -1,12 +1,35 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
-from fastapi.responses import FileResponse
+from dataclasses import asdict
+from typing import Any
 
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+from app.application.rooms import Participant, RoomService
+from app.application.sessions import RoomSessionService, SessionError
+from app.application.snapshots import SnapshotProjector
 from app.config import Settings
+from app.domain.types import CommandError
+from app.infrastructure.voice import VoiceProvider
 from app.paths import STATIC_DIR
 
 router = APIRouter()
+
+
+class JoinRoomRequest(BaseModel):
+    nickname: str
+
+
+class RoomCommandRequest(BaseModel):
+    session_token: str
+    request_id: str
+    command: dict[str, Any]
+
+
+class VoiceTokenRequest(BaseModel):
+    session_token: str
 
 
 @router.get("/health")
@@ -24,3 +47,75 @@ async def health(request: Request) -> dict[str, str | bool]:
 @router.get("/")
 async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@router.post("/api/rooms/{room_id}/join")
+async def join_room(room_id: str, payload: JoinRoomRequest, request: Request) -> dict[str, Any]:
+    try:
+        result = request.app.state.command_gateway.handle_join(room_id=room_id, nickname=payload.nickname)
+    except CommandError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "room_id": result.room_id,
+        "player_id": result.player_id,
+        "session_token": result.session_token,
+        "snapshot": result.snapshot,
+    }
+
+
+@router.post("/api/rooms/{room_id}/command")
+async def room_command(room_id: str, payload: RoomCommandRequest, request: Request) -> dict[str, Any]:
+    try:
+        result = request.app.state.command_gateway.handle_command(
+            room_id=room_id,
+            session_token=payload.session_token,
+            request_id=payload.request_id,
+            command=payload.command,
+        )
+    except SessionError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except CommandError as exc:
+        status_code = 403 if "只有房主" in str(exc) else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    return {
+        "snapshot": result.snapshot,
+        "events": [asdict(event) for event in result.events],
+    }
+
+
+@router.post("/api/rooms/{room_id}/voice-token")
+async def voice_token(room_id: str, payload: VoiceTokenRequest, request: Request) -> dict[str, Any]:
+    session_service: RoomSessionService = request.app.state.session_service
+    room_service: RoomService = request.app.state.room_service
+    voice_provider: VoiceProvider = request.app.state.voice_provider
+    try:
+        claims = session_service.verify(payload.session_token, expected_room_id=room_id)
+        room = room_service.get_room(room_id)
+        participant = room_service.get_participant(room, claims.player_id)
+        if participant.token_version != claims.token_version:
+            raise SessionError("房间会话已失效，请重新加入房间。")
+    except SessionError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except CommandError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    can_publish_audio = True
+    if room.game is not None:
+        player_snapshot = SnapshotProjector.for_player(
+            game=room.game,
+            player_id=participant.player_id,
+            host_id=room.host_id,
+            room_id=room.room_id,
+        )
+        can_publish_audio = bool(player_snapshot["voice_state"]["can_publish_audio"])
+
+    return voice_provider.issue_join_token(
+        room_id=room.room_id,
+        player_id=participant.player_id,
+        display_name=_display_name(participant),
+        can_publish_audio=can_publish_audio,
+    )
+
+
+def _display_name(participant: Participant) -> str:
+    return f"{participant.seat}号-{participant.nickname}"
