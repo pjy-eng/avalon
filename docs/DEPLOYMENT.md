@@ -131,12 +131,13 @@ https://你的服务名.onrender.com
 
 ### 3. WebSocket state
 
-加入房间后确认页面能收到实时 state：
+加入房间并连接 WebSocket 后确认页面能收到准确的 state：
 
-- 新玩家加入后其他客户端列表更新。
-- 玩家 ready 后状态同步。
-- 房主 start 后进入游戏 snapshot。
-- reset 后回到可重新开始的房间状态。
+- 每个已加入玩家连接 WebSocket 后，能收到自己的初始 per-player state。
+- 玩家 ready 后，已连接客户端收到同步后的 state。
+- 房主 start 后，已连接客户端收到进入游戏后的 snapshot。
+- reset 后，已连接客户端收到可重新开始的房间状态。
+- join 后自动广播给已有 WebSocket 客户端是后续项；当前 join 走 HTTP，只返回新加入者自己的 snapshot。
 
 ### 4. Voice token
 
