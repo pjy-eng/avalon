@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Protocol
 
+import httpx
 import jwt
 
 
@@ -32,6 +33,14 @@ class VoiceProvider(Protocol):
     ) -> dict:
         ...
 
+    async def update_participant_permission(
+        self,
+        room_id: str,
+        player_id: str,
+        can_publish_audio: bool,
+    ) -> dict:
+        ...
+
 
 class NoopVoiceProvider:
     def issue_join_token(
@@ -44,6 +53,14 @@ class NoopVoiceProvider:
         return {"enabled": False, "reason": "voice_not_configured"}
 
     def permission_update_payload(
+        self,
+        room_id: str,
+        player_id: str,
+        can_publish_audio: bool,
+    ) -> dict:
+        return {"enabled": False, "reason": "voice_not_configured"}
+
+    async def update_participant_permission(
         self,
         room_id: str,
         player_id: str,
@@ -106,9 +123,51 @@ class LiveKitVoiceProvider:
             "permission": permission,
         }
 
+    async def update_participant_permission(
+        self,
+        room_id: str,
+        player_id: str,
+        can_publish_audio: bool,
+    ) -> dict:
+        payload = self.permission_update_payload(
+            room_id=room_id,
+            player_id=player_id,
+            can_publish_audio=can_publish_audio,
+        )
+        livekit_room = payload["room"]
+        admin_token = self._room_admin_token(livekit_room)
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.post(
+                f"{self._api_base_url()}/twirp/livekit.RoomService/UpdateParticipant",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json=payload,
+            )
+        response.raise_for_status()
+        return {"enabled": True, "status": "updated"}
+
     @staticmethod
     def _livekit_room(room_id: str) -> str:
         return f"avalon-{room_id}"
+
+    def _api_base_url(self) -> str:
+        if self.url.startswith("wss://"):
+            return f"https://{self.url.removeprefix('wss://').rstrip('/')}"
+        if self.url.startswith("ws://"):
+            return f"http://{self.url.removeprefix('ws://').rstrip('/')}"
+        return self.url.rstrip("/")
+
+    def _room_admin_token(self, livekit_room: str) -> str:
+        now = int(time.time())
+        payload = {
+            "iss": self.api_key,
+            "nbf": now,
+            "exp": now + 60,
+            "video": {
+                "roomAdmin": True,
+                "room": livekit_room,
+            },
+        }
+        return jwt.encode(payload, self.api_secret, algorithm="HS256")
 
     @staticmethod
     def _permission(livekit_room: str, can_publish_audio: bool) -> dict:

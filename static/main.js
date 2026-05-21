@@ -65,6 +65,14 @@ const appState = {
   selectedTeam: [],
   pendingAssassinationTarget: "",
   commandPending: null,
+  voiceRoom: null,
+  voiceConnected: false,
+  speakerMuted: false,
+  voiceConnectAttempt: 0,
+  voicePublishDesired: false,
+  voicePublishSyncing: false,
+  voicePublishSyncPromise: null,
+  voicePublishError: false,
 };
 
 const phaseLabels = {
@@ -87,16 +95,15 @@ const roleDescriptions = {
   "奥伯伦": "你属于邪恶方，但不会看见其他邪恶方，其他邪恶方也看不见你。",
 };
 
-const missingFeatureHints = {
-  select_team: "组队提交尚未接入 v2 命令网关，按钮暂时不可用。",
-  team_vote: "组队投票尚未接入 v2 命令网关，按钮暂时不可用。",
-  mission_vote: "任务票尚未接入 v2 命令网关，按钮暂时不可用。",
-  assassinate: "刺杀提交尚未接入 v2 命令网关，按钮暂时不可用。",
-  continue_after_result: "任务结果后的下一轮推进尚未接入 v2 命令网关，按钮暂时不可用。",
-  chat: "文字公屏尚未接入 v2 服务端消息，暂时不可发送。",
-  voice: "语音客户端尚未接入 v2 页面，暂时不可点击。",
-  tags: "私人标记尚未接入 v2 页面状态，暂时不可点击。",
-};
+const markOptions = [
+  {value: "trusted", label: "可信"},
+  {value: "suspect", label: "可疑"},
+  {value: "watch", label: "观察"},
+  {value: "", label: "清除"},
+];
+
+const liveKitClientUrl = "https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js";
+let liveKitClientPromise = null;
 
 window.addEventListener("load", init);
 
@@ -104,7 +111,7 @@ function init() {
   showLobby();
   bindEvents();
   hydrateJoinForm();
-  disableUnsupportedChrome();
+  updateVoiceButtons();
 }
 
 function bindEvents() {
@@ -117,6 +124,9 @@ function bindEvents() {
   elements.infoMiniBtn?.addEventListener("click", () => openInfoModal());
   elements.openInfoBtn?.addEventListener("click", () => openInfoModal());
   elements.openHistoryBtn?.addEventListener("click", () => openHistoryModal());
+  elements.voiceBtn?.addEventListener("click", toggleVoice);
+  elements.listenBtn?.addEventListener("click", toggleSpeaker);
+  elements.openTagsBtn?.addEventListener("click", openTagsModal);
   elements.sendChatBtn?.addEventListener("click", sendChatMessage);
   elements.chatInput?.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
@@ -160,19 +170,6 @@ function hydrateJoinForm() {
   if (roomFromUrl && lastName) {
     elements.roomInput.value = roomFromUrl;
   }
-}
-
-function disableUnsupportedChrome() {
-  disableControl(elements.voiceBtn, missingFeatureHints.voice);
-  disableControl(elements.listenBtn, missingFeatureHints.voice);
-  disableControl(elements.openTagsBtn, missingFeatureHints.tags);
-}
-
-function disableControl(element, reason) {
-  if (!element) return;
-  element.disabled = true;
-  element.title = reason;
-  element.setAttribute("aria-disabled", "true");
 }
 
 async function joinRoom() {
@@ -274,6 +271,7 @@ function connectWebSocket() {
 }
 
 function leaveRoom() {
+  disconnectVoice();
   if (appState.socket) {
     try { appState.socket.close(); } catch (_) {}
   }
@@ -287,6 +285,7 @@ function leaveRoom() {
   appState.selectedTeam = [];
   appState.pendingAssassinationTarget = "";
   appState.commandPending = null;
+  updateVoiceButtons();
   hideDealOverlay();
   closeModals();
   window.history.replaceState({}, "", "/");
@@ -320,6 +319,8 @@ function renderSnapshot(snapshot) {
   renderIdentityHint(snapshot);
   renderChat(snapshot);
   renderChatControls(snapshot);
+  syncVoicePublishing();
+  updateVoiceButtons();
   updateHostControls(snapshot);
 
   if (phaseChanged) {
@@ -405,6 +406,8 @@ function playerTags(player, snapshot) {
   if (currentTeam(snapshot).includes(player.player_id)) tags.push({kind: "team", label: "出征"});
   if (player.ready === true) tags.push({kind: "ready", label: "已准备"});
   if (player.ready === false && phase(snapshot) === "LOBBY") tags.push({kind: "not-ready", label: "未准备"});
+  const mark = privateMarkFor(player.player_id);
+  if (mark) tags.push({kind: `mark-${mark}`, label: markLabel(mark)});
   return tags;
 }
 
@@ -986,6 +989,294 @@ function closeActionModals() {
   if (actionModalOpen) elements.modalBackdrop?.classList.add("hidden");
   appState.selectedTeam = [];
   appState.pendingAssassinationTarget = "";
+}
+
+async function toggleVoice() {
+  if (appState.voiceConnected) {
+    disconnectVoice();
+    return;
+  }
+  await connectVoice();
+}
+
+async function connectVoice() {
+  const roomId = appState.roomId;
+  const sessionToken = appState.sessionToken;
+  const attemptId = appState.voiceConnectAttempt + 1;
+  appState.voiceConnectAttempt = attemptId;
+
+  if (!sessionToken || !roomId) {
+    showTopError("请先加入房间。");
+    return;
+  }
+
+  try {
+    const LiveKit = await loadLiveKitClient();
+    if (!isCurrentVoiceAttempt(attemptId, roomId, sessionToken)) return;
+    const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/voice-token`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({session_token: sessionToken}),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!isCurrentVoiceAttempt(attemptId, roomId, sessionToken)) return;
+    if (!response.ok) throw new Error(payload.detail || "语音连接失败。");
+    if (!payload.enabled) {
+      showTopError("语音未配置，当前可继续使用文字和游戏流程。");
+      updateVoiceButtons();
+      return;
+    }
+
+    const room = new LiveKit.Room();
+    room.on("trackSubscribed", (track) => {
+      const element = track.attach();
+      element.dataset.livekitAudio = "remote";
+      element.dataset.livekitAttempt = String(attemptId);
+      element.muted = appState.speakerMuted;
+      document.body.append(element);
+    });
+    room.on("trackUnsubscribed", (track) => {
+      track.detach().forEach((element) => element.remove());
+    });
+    await room.connect(payload.url, payload.token);
+    if (!isCurrentVoiceAttempt(attemptId, roomId, sessionToken)) {
+      try { room.disconnect(); } catch (_) {}
+      document.querySelectorAll(`[data-livekit-attempt="${attemptId}"]`).forEach((element) => element.remove());
+      return;
+    }
+    appState.voiceRoom = room;
+    appState.voiceConnected = true;
+    await syncVoicePublishing();
+    updateVoiceButtons();
+  } catch (error) {
+    if (!isCurrentVoiceAttempt(attemptId, roomId, sessionToken)) return;
+    showTopError(error.message || "语音连接失败。");
+  }
+}
+
+function liveKitClient() {
+  return window.LivekitClient || window.LiveKitClient;
+}
+
+function loadLiveKitClient() {
+  const existingClient = liveKitClient();
+  if (existingClient?.Room) return Promise.resolve(existingClient);
+  if (liveKitClientPromise) return liveKitClientPromise;
+
+  liveKitClientPromise = new Promise((resolve, reject) => {
+    let settled = false;
+    let script = document.querySelector("script[data-livekit-client]");
+    if (script?.dataset.livekitFailed === "true") {
+      script.remove();
+      script = null;
+    }
+    script = script || document.createElement("script");
+    const timeout = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      script.dataset.livekitFailed = "true";
+      script.remove();
+      reject(new Error("语音客户端加载失败，仍可继续文字和游戏流程。"));
+    }, 8000);
+
+    const finish = () => {
+      if (settled) return;
+      const client = liveKitClient();
+      if (client?.Room) {
+        settled = true;
+        window.clearTimeout(timeout);
+        resolve(client);
+        return;
+      }
+      settled = true;
+      window.clearTimeout(timeout);
+      script.dataset.livekitFailed = "true";
+      script.remove();
+      reject(new Error("语音客户端加载失败，仍可继续文字和游戏流程。"));
+    };
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      reject(new Error("语音客户端加载失败，仍可继续文字和游戏流程。"));
+    };
+
+    script.addEventListener("load", finish, {once: true});
+    script.addEventListener("error", fail, {once: true});
+    if (!script.parentNode) {
+      script.async = true;
+      script.dataset.livekitClient = "true";
+      script.src = liveKitClientUrl;
+      document.head.append(script);
+    }
+  }).catch((error) => {
+    liveKitClientPromise = null;
+    throw error;
+  });
+  return liveKitClientPromise;
+}
+
+function disconnectVoice() {
+  appState.voiceConnectAttempt += 1;
+  if (appState.voiceRoom) {
+    try { appState.voiceRoom.disconnect(); } catch (_) {}
+  }
+  document.querySelectorAll("[data-livekit-audio='remote']").forEach((element) => element.remove());
+  appState.voiceRoom = null;
+  appState.voiceConnected = false;
+  appState.voicePublishDesired = false;
+  appState.voicePublishSyncing = false;
+  appState.voicePublishSyncPromise = null;
+  appState.voicePublishError = false;
+  updateVoiceButtons();
+}
+
+function isCurrentVoiceAttempt(attemptId, roomId, sessionToken) {
+  return appState.voiceConnectAttempt === attemptId
+    && appState.roomId === roomId
+    && appState.sessionToken === sessionToken;
+}
+
+function syncVoicePublishing() {
+  appState.voicePublishDesired = Boolean(appState.snapshot?.voice_state?.can_publish_audio);
+  if (!appState.voiceRoom || !appState.voiceConnected) {
+    updateVoiceButtons();
+    return Promise.resolve();
+  }
+  if (appState.voicePublishSyncing) {
+    return appState.voicePublishSyncPromise || Promise.resolve();
+  }
+
+  appState.voicePublishSyncing = true;
+  appState.voicePublishSyncPromise = runVoicePublishingSync()
+    .finally(() => {
+      appState.voicePublishSyncing = false;
+      appState.voicePublishSyncPromise = null;
+      updateVoiceButtons();
+    });
+  return appState.voicePublishSyncPromise;
+}
+
+async function runVoicePublishingSync() {
+  while (appState.voiceRoom && appState.voiceConnected) {
+    const canPublish = appState.voicePublishDesired;
+    try {
+      await appState.voiceRoom.localParticipant.setMicrophoneEnabled(canPublish);
+      appState.voicePublishError = false;
+    } catch (_) {
+      appState.voicePublishError = true;
+      if (!canPublish) {
+        showTopError("禁麦同步失败，已断开语音以保护投票阶段。");
+        disconnectVoice();
+        return;
+      }
+      if (canPublish && appState.voicePublishDesired === canPublish) {
+        showTopError("无法开启麦克风，请检查浏览器权限。");
+      }
+    }
+    if (appState.voicePublishDesired === canPublish) return;
+  }
+}
+
+function toggleSpeaker() {
+  appState.speakerMuted = !appState.speakerMuted;
+  document.querySelectorAll("[data-livekit-audio='remote']").forEach((element) => {
+    element.muted = appState.speakerMuted;
+  });
+  updateVoiceButtons();
+}
+
+function updateVoiceButtons() {
+  const canPublish = Boolean(appState.snapshot?.voice_state?.can_publish_audio);
+  if (elements.voiceBtn) {
+    elements.voiceBtn.classList.toggle("voice-connected", appState.voiceConnected);
+    elements.voiceBtn.classList.toggle("voice-on", appState.voiceConnected && canPublish);
+    elements.voiceBtn.classList.toggle("voice-blocked", appState.voiceConnected && !canPublish);
+    let voiceTitle = canPublish ? "语音未连接，点击连接" : "语音未连接，连接后当前阶段禁麦";
+    if (appState.voiceConnected) {
+      voiceTitle = canPublish ? "语音已连接，麦克风开启" : "语音已连接，当前阶段禁麦";
+    }
+    if (appState.voiceConnected && appState.voicePublishError) {
+      voiceTitle = "麦克风状态异常，请重连语音";
+    }
+    elements.voiceBtn.title = voiceTitle;
+    const label = elements.voiceBtn.querySelector(".ctrl-label");
+    if (label) label.textContent = appState.voiceConnected
+      ? (appState.voicePublishError ? "异常" : (canPublish ? "开麦" : "禁麦"))
+      : "语音";
+  }
+  if (elements.listenBtn) {
+    elements.listenBtn.classList.toggle("voice-connected", appState.voiceConnected);
+    elements.listenBtn.classList.toggle("muted", appState.speakerMuted);
+    let speakerTitle = appState.voiceConnected ? "远端语音播放中" : "语音未连接，扬声器偏好保留";
+    if (appState.speakerMuted) {
+      speakerTitle = appState.voiceConnected ? "远端语音已静音" : "语音未连接，扬声器已静音偏好保留";
+    }
+    elements.listenBtn.title = speakerTitle;
+    const label = elements.listenBtn.querySelector(".ctrl-label");
+    if (label) label.textContent = appState.speakerMuted ? "静音" : "扬声器";
+  }
+}
+
+function privateMarkKey(playerId) {
+  if (!appState.roomId || !appState.playerId || !playerId) return "";
+  return `avalon_mark:${appState.roomId}:${appState.playerId}:${playerId}`;
+}
+
+function privateMarkFor(playerId) {
+  const key = privateMarkKey(playerId);
+  if (!key) return "";
+  try {
+    return localStorage.getItem(key) || "";
+  } catch (_) {
+    return "";
+  }
+}
+
+function setPrivateMark(playerId, value) {
+  const key = privateMarkKey(playerId);
+  if (!key) return;
+  try {
+    if (value) {
+      localStorage.setItem(key, value);
+    } else {
+      localStorage.removeItem(key);
+    }
+  } catch (_) {
+    showTopError("浏览器无法保存私人标记。");
+    return;
+  }
+  renderSnapshot(appState.snapshot);
+  openTagsModal();
+}
+
+function openTagsModal() {
+  if (!elements.tagsModalBody) return;
+  const players = normalizePlayers(appState.snapshot);
+  elements.tagsModalBody.replaceChildren();
+  players.forEach((player) => {
+    const row = document.createElement("div");
+    row.className = "mark-row";
+    const name = document.createElement("span");
+    name.textContent = player.display;
+    const actions = document.createElement("div");
+    actions.className = "mark-actions";
+    markOptions.forEach((option) => {
+      const selected = privateMarkFor(player.player_id) === option.value;
+      const item = button(option.label, selected ? "mini-btn selected" : "mini-btn", () => {
+        setPrivateMark(player.player_id, option.value);
+      });
+      actions.append(item);
+    });
+    row.append(name, actions);
+    elements.tagsModalBody.append(row);
+  });
+  openModal(elements.tagsModal);
+}
+
+function markLabel(value) {
+  const option = markOptions.find((item) => item.value === value);
+  return option?.label || "";
 }
 
 async function sendCommand(command) {

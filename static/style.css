@@ -346,6 +346,14 @@ body {
   border-color: rgba(59,95,214,.3);
   color: var(--primary);
 }
+.ctrl-btn.voice-blocked {
+  background: rgba(122,40,40,.14);
+  border-color: rgba(122,40,40,.28);
+  color: var(--evil);
+}
+.ctrl-btn.muted {
+  opacity: .72;
+}
 .ctrl-icon { font-size: 16px; line-height: 1; }
 .ctrl-label { font-size: 9px; line-height: 1; }
 .ctrl-danger { color: var(--destructive); }
@@ -479,6 +487,9 @@ body {
 .tag.team    { background: rgba(200,169,74,.15); color: var(--gold); border: 1px solid rgba(200,169,74,.25); }
 .tag.offline { background: rgba(122,40,40,.2);  color: #e06060;  border: 1px solid rgba(122,40,40,.3); }
 .tag.mark    { background: rgba(136,85,204,.2); color: #c4a0e8;  border: 1px solid rgba(136,85,204,.3); }
+.tag.mark-trusted { background: rgba(73,189,132,.18); color: var(--good); border: 1px solid rgba(73,189,132,.28); }
+.tag.mark-suspect { background: rgba(189,73,73,.18); color: var(--evil); border: 1px solid rgba(189,73,73,.28); }
+.tag.mark-watch { background: rgba(200,169,74,.18); color: var(--gold); border: 1px solid rgba(200,169,74,.28); }
 
 /* Kick button in seat card */
 .kick-btn {
@@ -1220,6 +1231,19 @@ body {
 .info-evil { color: var(--evil); }
 
 /* ─── Tags Modal ─── */
+.mark-row {
+  display: grid;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(255,255,255,.08);
+}
+
+.mark-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .tags-legend {
   display: flex;
   flex-wrap: wrap;
@@ -1473,6 +1497,11 @@ body {
 .mini-btn:hover {
   border-color: var(--gold);
   color: var(--gold);
+}
+.mini-btn.selected {
+  border-color: rgba(200,169,74,.8);
+  color: var(--gold);
+  background: rgba(200,169,74,.18);
 }
 .mini-btn:active { transform: scale(.97); }
 .mini-btn:disabled {

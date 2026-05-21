@@ -4,6 +4,7 @@ import jwt
 from fastapi.testclient import TestClient
 
 from app.config import Settings
+from app.infrastructure.voice import NoopVoiceProvider
 from app.main import create_app
 
 
@@ -149,6 +150,51 @@ def test_frontend_contains_chat_and_lobby_governance_handlers():
         assert required in main_js
 
     assert "renderActions(appState.snapshot);\n      renderChatControls(appState.snapshot);" in main_js
+
+
+def test_frontend_contains_voice_and_private_mark_handlers():
+    index_html = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    main_js = (REPO_ROOT / "static" / "main.js").read_text(encoding="utf-8")
+
+    assert "livekit-client.umd.min.js" in index_html
+    assert "async data-livekit-client" in index_html
+    assert index_html.index("livekit-client.umd.min.js") < index_html.index('/static/main.js')
+    for required in [
+        "toggleVoice",
+        "loadLiveKitClient",
+        "syncVoicePublishing",
+        "runVoicePublishingSync",
+        "toggleSpeaker",
+        "openTagsModal",
+        "setPrivateMark",
+        "privateMarkKey",
+        "liveKitClientUrl",
+        "voice_state?.can_publish_audio",
+        "voicePublishDesired",
+        "voicePublishError",
+        "setMicrophoneEnabled(canPublish)",
+        "禁麦同步失败，已断开语音以保护投票阶段。",
+        "麦克风状态异常，请重连语音",
+        "localStorage",
+        "openTagsBtn?.addEventListener(\"click\", openTagsModal)",
+        "voiceConnectAttempt",
+        "isCurrentVoiceAttempt",
+        "dataset.livekitFailed",
+        "room.disconnect()",
+        "classList.toggle(\"voice-connected\", appState.voiceConnected)",
+        "classList.toggle(\"voice-blocked\", appState.voiceConnected && !canPublish)",
+        "语音未连接，点击连接",
+        "语音未连接，连接后当前阶段禁麦",
+        "语音已连接，麦克风开启",
+        "语音已连接，当前阶段禁麦",
+        "elements.voiceBtn.title = voiceTitle",
+        "远端语音播放中",
+        "远端语音已静音",
+        "语音未连接，扬声器偏好保留",
+        "语音未连接，扬声器已静音偏好保留",
+        "elements.listenBtn.title = speakerTitle",
+    ]:
+        assert required in main_js
 
 
 def test_missing_gameplay_doc_tracks_full_game_blockers():
@@ -358,3 +404,121 @@ def test_voice_token_returns_livekit_join_token_when_configured():
     assert token_payload["sub"] == join["player_id"]
     assert token_payload["video"]["room"] == "avalon-ROOM1"
     assert token_payload["video"]["canPublish"] is True
+
+
+class RecordingVoiceProvider:
+    def __init__(self):
+        self.updates = []
+
+    def issue_join_token(self, room_id, player_id, display_name, can_publish_audio):
+        return {"enabled": True, "token": "fake", "can_publish_audio": can_publish_audio}
+
+    def permission_update_payload(self, room_id, player_id, can_publish_audio):
+        return {"room_id": room_id, "player_id": player_id, "can_publish_audio": can_publish_audio}
+
+    async def update_participant_permission(self, room_id, player_id, can_publish_audio):
+        self.updates.append(
+            {
+                "room_id": room_id,
+                "player_id": player_id,
+                "can_publish_audio": can_publish_audio,
+            }
+        )
+        return {"enabled": True}
+
+
+def test_voice_token_reflects_muted_game_phase_publish_policy():
+    client = TestClient(
+        create_app(
+            Settings(
+                session_secret=SESSION_SECRET,
+                livekit_url="wss://livekit.example",
+                livekit_api_key="livekit-key",
+                livekit_api_secret=LIVEKIT_SECRET,
+            )
+        )
+    )
+    real_voice_provider = client.app.state.voice_provider
+    client.app.state.voice_provider = NoopVoiceProvider()
+    joins = [
+        client.post("/api/rooms/ROOM1/join", json={"nickname": f"玩家{i}"}).json()
+        for i in range(1, 6)
+    ]
+    start = client.post(
+        "/api/rooms/ROOM1/command",
+        json={
+            "session_token": joins[0]["session_token"],
+            "request_id": "start-muted-voice",
+            "command": {"type": "start_game"},
+        },
+    ).json()
+    leader_id = start["snapshot"]["phase_summary"]["leader_id"]
+    required = start["snapshot"]["phase_summary"]["required_team_size"]
+    players = start["snapshot"].get("participants") or start["snapshot"]["players"]
+    team = [participant["player_id"] for participant in players[:required]]
+    leader = next(join for join in joins if join["player_id"] == leader_id)
+
+    vote_phase = client.post(
+        "/api/rooms/ROOM1/command",
+        json={
+            "session_token": leader["session_token"],
+            "request_id": "select-muted-voice",
+            "command": {"type": "select_team", "team": team},
+        },
+    ).json()["snapshot"]
+
+    assert vote_phase["phase_summary"]["phase"] == "TEAM_VOTE"
+    assert vote_phase["voice_state"]["can_publish_audio"] is False
+    client.app.state.voice_provider = real_voice_provider
+
+    response = client.post(
+        "/api/rooms/ROOM1/voice-token",
+        json={"session_token": leader["session_token"]},
+    )
+
+    assert response.status_code == 200
+    token_payload = jwt.decode(response.json()["token"], LIVEKIT_SECRET, algorithms=["HS256"])
+    assert token_payload["video"]["canPublish"] is False
+    assert token_payload["video"]["canPublishSources"] == []
+
+
+def test_http_commands_sync_livekit_permissions_when_phase_mutes_audio():
+    client = TestClient(create_app(Settings(session_secret=SESSION_SECRET)))
+    voice_provider = RecordingVoiceProvider()
+    client.app.state.voice_provider = voice_provider
+    joins = [
+        client.post("/api/rooms/ROOM1/join", json={"nickname": f"玩家{i}"}).json()
+        for i in range(1, 6)
+    ]
+    start = client.post(
+        "/api/rooms/ROOM1/command",
+        json={
+            "session_token": joins[0]["session_token"],
+            "request_id": "start-voice-sync",
+            "command": {"type": "start_game"},
+        },
+    ).json()
+    leader_id = start["snapshot"]["phase_summary"]["leader_id"]
+    required = start["snapshot"]["phase_summary"]["required_team_size"]
+    players = start["snapshot"].get("participants") or start["snapshot"]["players"]
+    team = [participant["player_id"] for participant in players[:required]]
+    leader = next(join for join in joins if join["player_id"] == leader_id)
+    voice_provider.updates.clear()
+
+    response = client.post(
+        "/api/rooms/ROOM1/command",
+        json={
+            "session_token": leader["session_token"],
+            "request_id": "select-voice-sync",
+            "command": {"type": "select_team", "team": team},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["snapshot"]["voice_state"]["can_publish_audio"] is False
+    updates = {
+        item["player_id"]: item["can_publish_audio"]
+        for item in voice_provider.updates
+        if item["room_id"] == "ROOM1"
+    }
+    assert updates == {join["player_id"]: False for join in joins}

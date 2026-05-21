@@ -10,7 +10,6 @@ from pydantic import BaseModel, StringConstraints
 from app.api.ws import notify_room_after_command
 from app.application.rooms import Participant, RoomService
 from app.application.sessions import RoomSessionService, SessionError
-from app.application.snapshots import SnapshotProjector
 from app.config import Settings
 from app.domain.types import CommandError
 from app.infrastructure.voice import VoiceProvider
@@ -93,6 +92,7 @@ async def room_command(room_id: str, payload: RoomCommandRequest, request: Reque
         room_service=request.app.state.room_service,
         room_id=room_id,
         result=result,
+        voice_provider=request.app.state.voice_provider,
     )
     return {
         "snapshot": result.snapshot,
@@ -119,13 +119,7 @@ async def voice_token(room_id: str, payload: VoiceTokenRequest, request: Request
 
     can_publish_audio = True
     if room.game is not None:
-        player_snapshot = SnapshotProjector.for_player(
-            game=room.game,
-            player_id=participant.player_id,
-            host_id=room.host_id,
-            room_id=room.room_id,
-        )
-        can_publish_audio = bool(player_snapshot["voice_state"]["can_publish_audio"])
+        can_publish_audio = room.game.phase.value not in {"TEAM_VOTE", "MISSION_VOTE"}
 
     return voice_provider.issue_join_token(
         room_id=room.room_id,

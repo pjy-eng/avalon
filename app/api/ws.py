@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, WebSocket
@@ -9,7 +10,8 @@ from app.application.commands import CommandGateway, CommandResult
 from app.application.events import AppEvent
 from app.application.rooms import RoomService
 from app.application.sessions import RoomSessionService, SessionError
-from app.domain.types import CommandError
+from app.domain.types import CommandError, Phase
+from app.infrastructure.voice import VoiceProvider
 from app.realtime import ConnectionManager
 
 router = APIRouter()
@@ -19,6 +21,17 @@ REQUEST_ID_REQUIRED_ERROR = "request_id 不能为空。"
 REQUEST_ID_TYPE_ERROR = "request_id 必须是字符串。"
 REQUEST_ID_TOO_LONG_ERROR = "request_id 长度不能超过 128。"
 ROOM_MISSING_ON_DISCONNECT_ERROR = "房间不存在，请重新加入。"
+VOICE_PERMISSION_SYNC_TIMEOUT_SECONDS = 2.0
+VOICE_POLICY_EVENT_TYPES = {
+    "game_started",
+    "room_reset",
+    "team_selected",
+    "team_vote_resolved",
+    "mission_resolved",
+    "round_advanced",
+    "assassination_resolved",
+    "game_over",
+}
 
 
 @router.websocket("/ws/{room_id}")
@@ -32,6 +45,7 @@ async def room_websocket(websocket: WebSocket, room_id: str) -> None:
     command_gateway: CommandGateway = websocket.app.state.command_gateway
     room_service: RoomService = websocket.app.state.room_service
     session_service: RoomSessionService = websocket.app.state.session_service
+    voice_provider: VoiceProvider = websocket.app.state.voice_provider
 
     try:
         hello_message = await websocket.receive_json()
@@ -74,6 +88,7 @@ async def room_websocket(websocket: WebSocket, room_id: str) -> None:
                 command_gateway=command_gateway,
                 room_service=room_service,
                 connection_manager=manager,
+                voice_provider=voice_provider,
             )
     except WebSocketDisconnect:
         return
@@ -103,6 +118,7 @@ async def _handle_message(
     command_gateway: CommandGateway,
     room_service: RoomService,
     connection_manager: ConnectionManager,
+    voice_provider: VoiceProvider,
 ) -> None:
     if not isinstance(message, dict):
         await websocket.send_json({"type": "error", "message": "消息格式无效。"})
@@ -144,6 +160,7 @@ async def _handle_message(
         room_service=room_service,
         room_id=room_id,
         result=result,
+        voice_provider=voice_provider,
     )
 
 
@@ -153,12 +170,53 @@ async def notify_room_after_command(
     room_service: RoomService,
     room_id: str,
     result: CommandResult,
+    voice_provider: VoiceProvider,
 ) -> None:
     await _disconnect_removed_players(connection_manager, room_id, result)
+    if _voice_policy_may_have_changed(result):
+        await _sync_voice_permissions(voice_provider, room_service, room_id)
     await connection_manager.broadcast_room(
         room_id,
         payload_factory=lambda player_id: _state_payload_for_player(command_gateway, room_service, room_id, player_id),
     )
+
+
+def _voice_policy_may_have_changed(result: CommandResult) -> bool:
+    return any(event.event_type in VOICE_POLICY_EVENT_TYPES for event in result.events)
+
+
+async def _sync_voice_permissions(
+    voice_provider: VoiceProvider,
+    room_service: RoomService,
+    room_id: str,
+) -> None:
+    room = room_service.get_room(room_id)
+    can_publish_audio = True
+    if room.game is not None:
+        can_publish_audio = room.game.phase not in {Phase.TEAM_VOTE, Phase.MISSION_VOTE}
+    try:
+        probe = voice_provider.permission_update_payload(room_id, "__probe__", can_publish_audio)
+    except Exception:
+        return
+    if probe.get("enabled") is False:
+        return
+    tasks = [
+        voice_provider.update_participant_permission(
+            room_id=room.room_id,
+            player_id=participant.player_id,
+            can_publish_audio=can_publish_audio,
+        )
+        for participant in list(room.participants)
+    ]
+    if not tasks:
+        return
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=VOICE_PERMISSION_SYNC_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        return
 
 
 async def _disconnect_removed_players(
