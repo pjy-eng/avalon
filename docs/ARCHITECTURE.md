@@ -46,7 +46,7 @@ Client render
 6. `SnapshotProjector` 把 authoritative state 投影成指定玩家可见的 per-player snapshot。
 7. API 返回当前 actor snapshot，WebSocket 通过 `ConnectionManager` 广播各自裁剪后的 state。
 
-当前 `CommandGateway` 已接入 join、ready、start、reset。完整游戏动作如 select team、team vote、mission vote、assassination 的前端发送和 gateway 命令接入仍是后续任务。
+当前 `CommandGateway` 已接入 join、ready、start、reset、select_team、team_vote、mission_vote、continue_after_result、assassinate、send_chat 和大厅治理命令。HTTP 与 WebSocket 仍共享同一路径，避免两套规则裁定。
 
 ## 模块地图
 
@@ -114,7 +114,9 @@ static/
 - 每个玩家只收到自己的 `private_panel.role` 和按角色规则可见的玩家。
 - 公共玩家列表只包含展示名、座位顺序、leader 等公共信息。
 - `my_action` 只描述当前玩家自己的下一步动作。
-- 后续接入投票和任务历史时，应继续在 projector 层区分 public result、private vote、hidden vote。
+- 投票和任务历史继续在 projector 层区分 public result、private vote、hidden vote。
+
+新增 gameplay completion 字段包括 `public_timeline`、`mission_result`、`reveal_roles`、`speaker_state`、`online_state` 和 `chat_history`。其中 `reveal_roles` 仅在 `GAME_OVER` 返回；`TEAM_VOTE` 与 `MISSION_VOTE` 阶段统一禁言禁麦。
 
 如果 UI 需要新增展示字段，优先在 snapshot contract 中显式建模，不要在前端用字符串或 DOM 状态硬猜。
 
@@ -125,7 +127,7 @@ static/
 - `GET /`：返回 `static/index.html`。
 - `GET /health`：返回 service、database、redis、voice 状态。
 - `POST /api/rooms/{room_id}/join`：加入房间并签发 session token。
-- `POST /api/rooms/{room_id}/command`：提交 ready/start/reset 等命令。
+- `POST /api/rooms/{room_id}/command`：提交 ready/start/reset、完整游戏动作、聊天和大厅治理命令。
 - `POST /api/rooms/{room_id}/voice-token`：按当前 voice provider 返回 token 或 disabled 状态。
 
 当前 WebSocket 入口：
@@ -158,12 +160,10 @@ LIVEKIT_API_SECRET
 
 这些内容不要在产品说明或部署说明里写成已完成：
 
-- 前端完整发送 select team、team vote、mission vote、assassination。
-- CommandGateway 对完整阿瓦隆游戏动作的命令接入。
 - CommandGateway 到 repository/event log 的生产级事务持久化。
 - Redis-backed 多实例房间恢复闭环。
 - 多人浏览器端到端自动化验收。
-- LiveKit 之外的语音状态治理、权限审计和异常恢复。
+- 更完整的语音权限审计、异常恢复和跨实例在线状态恢复。
 
 ## 修改建议
 

@@ -9,16 +9,17 @@ Avalon Online v2 是一个面向朋友局的网页版阿瓦隆原型。玩家用
 第一阶段已经接入：
 
 - 房间加入和 per-room session token。
-- 大厅 ready、start、reset 命令。
+- 大厅 ready、start、reset 和房主治理命令。
+- 完整一局游戏闭环：选队、组队投票、任务票、任务结果复盘推进、刺杀和终局身份公开。
 - 每名玩家独立的 per-player snapshot。
 - HTTP + WebSocket 实时状态同步。
-- `NoopVoiceProvider` / LiveKit voice token 接口。
+- 公开历史、文字公屏、在线状态、本地私人标记和按阶段控场。
+- `NoopVoiceProvider` / LiveKit voice token 接口，以及 LiveKit 前端降级接入。
 - repository 与 event log 基础代码，为后续持久化接入做好准备。
-- `static/` 第一阶段结构化 snapshot UI。
+- `static/` 朋友局圆桌 UI。
 
 仍在后续接入：
 
-- 前端发送 `select_team`、`team_vote`、`mission_vote`、`assassinate` 等完整游戏动作。
 - CommandGateway 到数据库 repository/event log 的生产持久化闭环。
 - 更完整的自动化浏览器和多人联机验收。
 

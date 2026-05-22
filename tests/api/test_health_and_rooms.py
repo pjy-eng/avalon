@@ -197,10 +197,13 @@ def test_frontend_contains_voice_and_private_mark_handlers():
         assert required in main_js
 
 
-def test_missing_gameplay_doc_tracks_full_game_blockers():
+def test_missing_gameplay_doc_tracks_completion_status_and_history():
     doc = (REPO_ROOT / "docs" / "MISSING_GAMEPLAY_FEATURES.md").read_text(encoding="utf-8")
 
     for required in [
+        "v2 Gameplay Completion Status",
+        "当前已实现",
+        "历史缺失清单",
         "select_team",
         "team_vote",
         "mission_vote",
@@ -208,10 +211,14 @@ def test_missing_gameplay_doc_tracks_full_game_blockers():
         "assassinate",
         "public_timeline",
         "reveal_roles",
+        "send_chat",
+        "online_state",
+        "localStorage",
     ]:
         assert required in doc
 
-    assert "当前版本不能完成一整局游戏" in doc
+    assert "当前 v2 已覆盖第 1-12 步的完整一局链路" in doc
+    assert "当前版本不能完成一整局游戏" not in doc
 
 
 def test_join_room_returns_session_token_and_snapshot():
