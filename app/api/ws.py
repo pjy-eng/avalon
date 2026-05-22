@@ -172,7 +172,7 @@ async def notify_room_after_command(
     result: CommandResult,
     voice_provider: VoiceProvider,
 ) -> None:
-    await _disconnect_removed_players(connection_manager, room_id, result)
+    await _disconnect_removed_players(connection_manager, voice_provider, room_id, result)
     if _voice_policy_may_have_changed(result):
         await _sync_voice_permissions(voice_provider, room_service, room_id)
     await connection_manager.broadcast_room(
@@ -221,6 +221,7 @@ async def _sync_voice_permissions(
 
 async def _disconnect_removed_players(
     connection_manager: ConnectionManager,
+    voice_provider: VoiceProvider,
     room_id: str,
     result: CommandResult,
 ) -> None:
@@ -228,6 +229,7 @@ async def _disconnect_removed_players(
         removed_player_id = _removed_player_id(event)
         if removed_player_id is None:
             continue
+        await _remove_voice_participant(voice_provider, room_id, removed_player_id)
         await connection_manager.disconnect_player(
             room_id=room_id,
             player_id=removed_player_id,
@@ -237,6 +239,26 @@ async def _disconnect_removed_players(
                 "player_id": removed_player_id,
             },
         )
+
+
+async def _remove_voice_participant(
+    voice_provider: VoiceProvider,
+    room_id: str,
+    player_id: str,
+) -> None:
+    try:
+        probe = voice_provider.participant_removal_payload(room_id, player_id)
+    except Exception:
+        return
+    if probe.get("enabled") is False:
+        return
+    try:
+        await asyncio.wait_for(
+            voice_provider.remove_participant(room_id=room_id, player_id=player_id),
+            timeout=VOICE_PERMISSION_SYNC_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return
 
 
 def _removed_player_id(event: AppEvent) -> str | None:

@@ -73,6 +73,8 @@ const appState = {
   voicePublishSyncing: false,
   voicePublishSyncPromise: null,
   voicePublishError: false,
+  reconnectAttempts: 0,
+  reconnectTimer: null,
 };
 
 const phaseLabels = {
@@ -110,8 +112,11 @@ window.addEventListener("load", init);
 function init() {
   showLobby();
   bindEvents();
-  hydrateJoinForm();
+  const resumeRoomId = hydrateJoinForm();
   updateVoiceButtons();
+  if (resumeRoomId) {
+    resumeStoredSession(resumeRoomId);
+  }
 }
 
 function bindEvents() {
@@ -152,8 +157,8 @@ function submitJoinOnEnter(event) {
 function hydrateJoinForm() {
   const params = new URLSearchParams(window.location.search);
   const roomFromUrl = normalizeRoom(params.get("room") || "");
-  const lastRoom = localStorage.getItem("avalon_last_room") || "";
-  const lastName = localStorage.getItem("avalon_player_name") || "";
+  const lastRoom = browserStorageGetItem("avalon_last_room") || "";
+  const lastName = browserStorageGetItem("avalon_player_name") || "";
   if (roomFromUrl) elements.roomInput.value = roomFromUrl;
   if (lastName) elements.nameInput.value = lastName;
 
@@ -169,6 +174,48 @@ function hydrateJoinForm() {
 
   if (roomFromUrl && lastName) {
     elements.roomInput.value = roomFromUrl;
+  }
+  return roomFromUrl;
+}
+
+async function resumeStoredSession(roomId) {
+  const saved = storedSessionFor(roomId) || {};
+  const sessionToken = saved.session_token || sessionTokenFromHash();
+  if (!sessionToken) return false;
+
+  if (elements.joinBtn) elements.joinBtn.disabled = true;
+  showJoinStatus("正在恢复圆桌……");
+  try {
+    const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/resume`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({session_token: sessionToken}),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || "恢复房间失败。");
+
+    appState.roomId = payload.room_id || roomId;
+    appState.playerId = payload.player_id;
+    appState.sessionToken = payload.session_token || sessionToken;
+    appState.snapshot = payload.snapshot;
+    const sessionPersisted = persistSession(
+      appState.roomId,
+      saved.nickname || payload.snapshot?.you?.nickname || "",
+      appState.playerId,
+      appState.sessionToken,
+    );
+    updateRoomUrl(appState.roomId, sessionPersisted ? "" : appState.sessionToken);
+    showGame();
+    addSystemMessage("已恢复圆桌。");
+    renderSnapshot(payload.snapshot);
+    connectWebSocket();
+    return true;
+  } catch (error) {
+    clearStoredSession(roomId);
+    showJoinStatus(error.message || "恢复房间失败，请重新加入。", true);
+    return false;
+  } finally {
+    if (elements.joinBtn) elements.joinBtn.disabled = false;
   }
 }
 
@@ -195,9 +242,8 @@ async function joinRoom() {
     appState.playerId = payload.player_id;
     appState.sessionToken = payload.session_token;
     appState.snapshot = payload.snapshot;
-    localStorage.setItem("avalon_last_room", appState.roomId);
-    localStorage.setItem("avalon_player_name", nickname);
-    window.history.replaceState({}, "", `/?room=${encodeURIComponent(appState.roomId)}`);
+    const sessionPersisted = persistSession(appState.roomId, nickname, appState.playerId, appState.sessionToken);
+    updateRoomUrl(appState.roomId, sessionPersisted ? "" : appState.sessionToken);
 
     showGame();
     addSystemMessage("已进入圆桌。");
@@ -211,6 +257,7 @@ async function joinRoom() {
 }
 
 function connectWebSocket() {
+  clearReconnectTimer();
   if (appState.socket) {
     try { appState.socket.close(); } catch (_) {}
   }
@@ -219,6 +266,8 @@ function connectWebSocket() {
   appState.socket = socket;
 
   socket.addEventListener("open", () => {
+    if (appState.socket !== socket) return;
+    appState.reconnectAttempts = 0;
     socket.send(JSON.stringify({type: "hello", session_token: appState.sessionToken}));
     addSystemMessage("实时连接已建立。");
   });
@@ -246,6 +295,13 @@ function connectWebSocket() {
     }
     if (payload.type === "error") {
       setCommandPending(null, false);
+      if (isSessionErrorMessage(payload.message)) {
+        const roomId = appState.roomId;
+        clearStoredSession(roomId);
+        leaveRoom({clearSession: true});
+        showJoinStatus(payload.message || "房间会话已失效，请重新加入。", true);
+        return;
+      }
       showTopError(payload.message || "服务端返回错误。");
       renderActions(appState.snapshot);
       renderChatControls(appState.snapshot);
@@ -261,19 +317,28 @@ function connectWebSocket() {
     }
   });
   socket.addEventListener("close", () => {
+    if (appState.socket !== socket) return;
     setCommandPending(null);
-    addSystemMessage("实时连接已断开，刷新或重新进入房间可恢复。", true);
+    appState.socket = null;
+    scheduleReconnect();
   });
   socket.addEventListener("error", () => {
+    if (appState.socket !== socket) return;
     setCommandPending(null);
     showTopError("实时连接异常。");
   });
 }
 
-function leaveRoom() {
+function leaveRoom(options = {}) {
+  const roomId = appState.roomId;
+  const clearSession = options.clearSession !== false;
+  clearReconnectTimer();
   disconnectVoice();
   if (appState.socket) {
     try { appState.socket.close(); } catch (_) {}
+  }
+  if (clearSession && roomId) {
+    clearStoredSession(roomId);
   }
   appState.roomId = "";
   appState.sessionToken = "";
@@ -297,7 +362,7 @@ async function handleBackButton() {
     await sendCommand({type: "leave_room"});
     return;
   }
-  leaveRoom();
+  leaveRoom({clearSession: false});
 }
 
 function renderSnapshot(snapshot) {
@@ -1226,23 +1291,14 @@ function privateMarkKey(playerId) {
 function privateMarkFor(playerId) {
   const key = privateMarkKey(playerId);
   if (!key) return "";
-  try {
-    return localStorage.getItem(key) || "";
-  } catch (_) {
-    return "";
-  }
+  return browserStorageGetItem(key) || "";
 }
 
 function setPrivateMark(playerId, value) {
   const key = privateMarkKey(playerId);
   if (!key) return;
-  try {
-    if (value) {
-      localStorage.setItem(key, value);
-    } else {
-      localStorage.removeItem(key);
-    }
-  } catch (_) {
+  const saved = value ? browserStorageSetItem(key, value) : (browserStorageRemoveItem(key), true);
+  if (!saved) {
     showTopError("浏览器无法保存私人标记。");
     return;
   }
@@ -1456,6 +1512,145 @@ function normalizeRoom(value) {
     .toUpperCase()
     .replace(/[^A-Z0-9_-]/g, "")
     .slice(0, 24);
+}
+
+function sessionStorageKey(roomId) {
+  const normalized = normalizeRoom(roomId);
+  return normalized ? `avalon_session:${normalized}` : "";
+}
+
+function storedSessionFor(roomId) {
+  const key = sessionStorageKey(roomId);
+  if (!key) return null;
+  try {
+    const raw = browserStorageGetItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.session_token) return null;
+    return parsed;
+  } catch (_) {
+    clearStoredSession(roomId);
+    return null;
+  }
+}
+
+function persistSession(roomId, nickname, playerId, sessionToken) {
+  const normalized = normalizeRoom(roomId);
+  const key = sessionStorageKey(normalized);
+  if (!normalized || !key || !sessionToken) return false;
+  browserStorageSetItem("avalon_last_room", normalized);
+  if (nickname) browserStorageSetItem("avalon_player_name", nickname);
+  const sessionValue = JSON.stringify({
+    room_id: normalized,
+    player_id: playerId || "",
+    nickname: nickname || "",
+    session_token: sessionToken,
+    updated_at: Date.now(),
+  });
+  const saved = browserStorageSetItem(key, sessionValue);
+  const verified = saved && browserStorageGetItem(key) === sessionValue;
+  if (!verified) {
+    showTopError("浏览器无法保存房间会话，刷新后可能需要重新加入。");
+  }
+  return verified;
+}
+
+function clearStoredSession(roomId) {
+  const key = sessionStorageKey(roomId);
+  if (!key) return;
+  browserStorageRemoveItem(key);
+}
+
+function sessionTokenFromHash() {
+  try {
+    const params = new URLSearchParams(String(window.location.hash || "").replace(/^#/, ""));
+    return (params.get("session") || "").trim();
+  } catch (_) {
+    return "";
+  }
+}
+
+function updateRoomUrl(roomId, sessionToken) {
+  const roomPart = `/?room=${encodeURIComponent(roomId)}`;
+  const hashPart = sessionToken ? `#session=${encodeURIComponent(sessionToken)}` : "";
+  window.history.replaceState({}, "", `${roomPart}${hashPart}`);
+}
+
+function browserStorageGetItem(key) {
+  try {
+    if (typeof window.localStorage !== "undefined") {
+      const value = window.localStorage.getItem(key);
+      if (value !== null) return value;
+    }
+  } catch (_) {}
+  try {
+    const encodedKey = storageCookieName(key);
+    const cookie = document.cookie
+      .split("; ")
+      .find((item) => item.startsWith(`${encodedKey}=`));
+    if (cookie) return decodeURIComponent(cookie.slice(encodedKey.length + 1));
+  } catch (_) {}
+  return null;
+}
+
+function browserStorageSetItem(key, value) {
+  let saved = false;
+  try {
+    if (typeof window.localStorage !== "undefined") {
+      window.localStorage.setItem(key, value);
+      saved = true;
+    }
+  } catch (_) {}
+  try {
+    document.cookie = `${storageCookieName(key)}=${encodeURIComponent(value)}; path=/; max-age=43200; SameSite=Lax`;
+    saved = true;
+  } catch (_) {}
+  return saved;
+}
+
+function browserStorageRemoveItem(key) {
+  try {
+    if (typeof window.localStorage !== "undefined") {
+      window.localStorage.removeItem(key);
+    }
+  } catch (_) {}
+  try {
+    document.cookie = `${storageCookieName(key)}=; path=/; max-age=0; SameSite=Lax`;
+  } catch (_) {}
+}
+
+function storageCookieName(key) {
+  return `avalon_${String(key).replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 120)}`;
+}
+
+function scheduleReconnect() {
+  if (!appState.roomId || !appState.sessionToken) {
+    addSystemMessage("实时连接已断开。", true);
+    return;
+  }
+  if (appState.reconnectTimer) return;
+  appState.reconnectAttempts += 1;
+  const delay = Math.min(1000 * (2 ** Math.max(0, appState.reconnectAttempts - 1)), 8000);
+  addSystemMessage(`实时连接已断开，${Math.round(delay / 1000)} 秒后尝试恢复。`, true);
+  appState.reconnectTimer = window.setTimeout(() => {
+    appState.reconnectTimer = null;
+    if (appState.roomId && appState.sessionToken) {
+      connectWebSocket();
+    }
+  }, delay);
+}
+
+function clearReconnectTimer() {
+  if (!appState.reconnectTimer) return;
+  window.clearTimeout(appState.reconnectTimer);
+  appState.reconnectTimer = null;
+}
+
+function isSessionErrorMessage(message) {
+  const text = String(message || "");
+  return text.includes("会话")
+    || text.includes("不属于该房间玩家")
+    || text.includes("房间不存在");
 }
 
 function makeRequestId() {

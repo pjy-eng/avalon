@@ -113,6 +113,18 @@ def test_livekit_permission_update_payload_disables_audio_publish():
     }
 
 
+def test_livekit_participant_removal_payload_targets_voice_identity():
+    provider = LiveKitVoiceProvider(
+        url="wss://livekit.example",
+        api_key="key",
+        api_secret=TEST_SECRET,
+    )
+
+    payload = provider.participant_removal_payload(room_id="ROOM1", player_id="p1")
+
+    assert payload == {"room": "avalon-ROOM1", "identity": "p1"}
+
+
 def test_livekit_metadata_is_json_and_name_claim_preserves_chinese_display_name():
     provider = LiveKitVoiceProvider(
         url="wss://livekit.example",

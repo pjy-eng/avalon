@@ -6,7 +6,7 @@ from typing import Any
 
 from app.application.events import AppEvent
 from app.application.rooms import JoinResult, RequestRecord, Room, RoomService
-from app.application.sessions import RoomSessionService
+from app.application.sessions import RoomSessionService, SessionError
 from app.application.snapshots import SnapshotProjector
 from app.domain.game import AvalonGame
 from app.domain.types import CommandError, Phase
@@ -31,6 +31,19 @@ class CommandGateway:
 
     def handle_join(self, room_id: str, nickname: str) -> JoinResult:
         return self.room_service.join(room_id=room_id, nickname=nickname)
+
+    def handle_resume(self, room_id: str, session_token: str) -> JoinResult:
+        claims = self.session_service.verify(session_token, expected_room_id=room_id)
+        room = self.room_service.get_room(room_id)
+        participant = self.room_service.get_participant(room, claims.player_id)
+        if participant.token_version != claims.token_version:
+            raise SessionError("房间会话已失效，请重新加入房间。")
+        return JoinResult(
+            room_id=room.room_id,
+            player_id=participant.player_id,
+            session_token=session_token,
+            snapshot=self._snapshot_for_actor(room.room_id, participant.player_id),
+        )
 
     def handle_command(
         self,

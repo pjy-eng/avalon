@@ -231,6 +231,7 @@ def test_join_room_returns_session_token_and_snapshot():
     assert payload["room_id"] == "ROOM1"
     assert payload["player_id"].startswith("p_")
     assert payload["session_token"]
+    assert response.cookies.get("avalon_avalon_session_ROOM1") == payload["session_token"]
     assert payload["snapshot"]["room"]["room_id"] == "ROOM1"
     assert payload["snapshot"]["you"]["nickname"] == "阿澈"
 
@@ -416,12 +417,16 @@ def test_voice_token_returns_livekit_join_token_when_configured():
 class RecordingVoiceProvider:
     def __init__(self):
         self.updates = []
+        self.removals = []
 
     def issue_join_token(self, room_id, player_id, display_name, can_publish_audio):
         return {"enabled": True, "token": "fake", "can_publish_audio": can_publish_audio}
 
     def permission_update_payload(self, room_id, player_id, can_publish_audio):
         return {"room_id": room_id, "player_id": player_id, "can_publish_audio": can_publish_audio}
+
+    def participant_removal_payload(self, room_id, player_id):
+        return {"room_id": room_id, "player_id": player_id}
 
     async def update_participant_permission(self, room_id, player_id, can_publish_audio):
         self.updates.append(
@@ -432,6 +437,67 @@ class RecordingVoiceProvider:
             }
         )
         return {"enabled": True}
+
+    async def remove_participant(self, room_id, player_id):
+        self.removals.append({"room_id": room_id, "player_id": player_id})
+        return {"enabled": True}
+
+
+def test_resume_room_restores_existing_player_snapshot_after_game_started():
+    client = TestClient(create_app(Settings(session_secret=SESSION_SECRET)))
+    joins = [
+        client.post("/api/rooms/ROOM1/join", json={"nickname": f"玩家{i}"}).json()
+        for i in range(1, 6)
+    ]
+    start = client.post(
+        "/api/rooms/ROOM1/command",
+        json={
+            "session_token": joins[0]["session_token"],
+            "request_id": "start-before-resume",
+            "command": {"type": "start_game"},
+        },
+    )
+    assert start.status_code == 200
+
+    response = client.post(
+        "/api/rooms/ROOM1/resume",
+        json={"session_token": joins[2]["session_token"]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["room_id"] == "ROOM1"
+    assert payload["player_id"] == joins[2]["player_id"]
+    assert payload["session_token"] == joins[2]["session_token"]
+    assert response.cookies.get("avalon_avalon_session_ROOM1") == joins[2]["session_token"]
+    assert payload["snapshot"]["you"]["player_id"] == joins[2]["player_id"]
+    assert payload["snapshot"]["room"]["status"] == "game"
+    assert "private_panel" in payload["snapshot"]
+
+
+def test_resume_room_rejects_removed_participant_session():
+    client = TestClient(create_app(Settings(session_secret=SESSION_SECRET)))
+    joins = [
+        client.post("/api/rooms/ROOM1/join", json={"nickname": f"玩家{i}"}).json()
+        for i in range(1, 6)
+    ]
+    kick = client.post(
+        "/api/rooms/ROOM1/command",
+        json={
+            "session_token": joins[0]["session_token"],
+            "request_id": "kick-before-resume",
+            "command": {"type": "kick_player", "target_id": joins[1]["player_id"]},
+        },
+    )
+    assert kick.status_code == 200
+
+    response = client.post(
+        "/api/rooms/ROOM1/resume",
+        json={"session_token": joins[1]["session_token"]},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "当前会话不属于该房间玩家。"
 
 
 def test_voice_token_reflects_muted_game_phase_publish_policy():
@@ -529,3 +595,25 @@ def test_http_commands_sync_livekit_permissions_when_phase_mutes_audio():
         if item["room_id"] == "ROOM1"
     }
     assert updates == {join["player_id"]: False for join in joins}
+
+
+def test_http_kick_removes_livekit_participant_from_voice_room():
+    client = TestClient(create_app(Settings(session_secret=SESSION_SECRET)))
+    voice_provider = RecordingVoiceProvider()
+    client.app.state.voice_provider = voice_provider
+    joins = [
+        client.post("/api/rooms/ROOM1/join", json={"nickname": f"玩家{i}"}).json()
+        for i in range(1, 6)
+    ]
+
+    response = client.post(
+        "/api/rooms/ROOM1/command",
+        json={
+            "session_token": joins[0]["session_token"],
+            "request_id": "kick-voice-player",
+            "command": {"type": "kick_player", "target_id": joins[1]["player_id"]},
+        },
+    )
+
+    assert response.status_code == 200
+    assert voice_provider.removals == [{"room_id": "ROOM1", "player_id": joins[1]["player_id"]}]

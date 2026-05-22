@@ -41,6 +41,20 @@ class VoiceProvider(Protocol):
     ) -> dict:
         ...
 
+    def participant_removal_payload(
+        self,
+        room_id: str,
+        player_id: str,
+    ) -> dict:
+        ...
+
+    async def remove_participant(
+        self,
+        room_id: str,
+        player_id: str,
+    ) -> dict:
+        ...
+
 
 class NoopVoiceProvider:
     def issue_join_token(
@@ -65,6 +79,20 @@ class NoopVoiceProvider:
         room_id: str,
         player_id: str,
         can_publish_audio: bool,
+    ) -> dict:
+        return {"enabled": False, "reason": "voice_not_configured"}
+
+    def participant_removal_payload(
+        self,
+        room_id: str,
+        player_id: str,
+    ) -> dict:
+        return {"enabled": False, "reason": "voice_not_configured"}
+
+    async def remove_participant(
+        self,
+        room_id: str,
+        player_id: str,
     ) -> dict:
         return {"enabled": False, "reason": "voice_not_configured"}
 
@@ -144,6 +172,33 @@ class LiveKitVoiceProvider:
             )
         response.raise_for_status()
         return {"enabled": True, "status": "updated"}
+
+    def participant_removal_payload(
+        self,
+        room_id: str,
+        player_id: str,
+    ) -> dict:
+        return {
+            "room": self._livekit_room(room_id),
+            "identity": player_id,
+        }
+
+    async def remove_participant(
+        self,
+        room_id: str,
+        player_id: str,
+    ) -> dict:
+        payload = self.participant_removal_payload(room_id=room_id, player_id=player_id)
+        livekit_room = payload["room"]
+        admin_token = self._room_admin_token(livekit_room)
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.post(
+                f"{self._api_base_url()}/twirp/livekit.RoomService/RemoveParticipant",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json=payload,
+            )
+        response.raise_for_status()
+        return {"enabled": True, "status": "removed"}
 
     @staticmethod
     def _livekit_room(room_id: str) -> str:

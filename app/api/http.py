@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import re
 from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, StringConstraints
 
@@ -24,6 +25,10 @@ MISSING_PARTICIPANT_MESSAGE = "当前会话不属于该房间玩家。"
 
 class JoinRoomRequest(BaseModel):
     nickname: StrippedNonEmpty
+
+
+class ResumeRoomRequest(BaseModel):
+    session_token: StrippedNonEmpty
 
 
 class RoomCommandRequest(BaseModel):
@@ -54,11 +59,33 @@ async def index() -> FileResponse:
 
 
 @router.post("/api/rooms/{room_id}/join")
-async def join_room(room_id: str, payload: JoinRoomRequest, request: Request) -> dict[str, Any]:
+async def join_room(room_id: str, payload: JoinRoomRequest, request: Request, response: Response) -> dict[str, Any]:
     try:
         result = request.app.state.command_gateway.handle_join(room_id=room_id, nickname=payload.nickname)
     except CommandError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _set_session_cookie(response, result.room_id, result.session_token)
+    return {
+        "room_id": result.room_id,
+        "player_id": result.player_id,
+        "session_token": result.session_token,
+        "snapshot": result.snapshot,
+    }
+
+
+@router.post("/api/rooms/{room_id}/resume")
+async def resume_room(room_id: str, payload: ResumeRoomRequest, request: Request, response: Response) -> dict[str, Any]:
+    try:
+        result = request.app.state.command_gateway.handle_resume(
+            room_id=room_id,
+            session_token=payload.session_token,
+        )
+    except SessionError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except CommandError as exc:
+        status_code = 401 if str(exc) == MISSING_PARTICIPANT_MESSAGE else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    _set_session_cookie(response, result.room_id, result.session_token)
     return {
         "room_id": result.room_id,
         "player_id": result.player_id,
@@ -131,3 +158,18 @@ async def voice_token(room_id: str, payload: VoiceTokenRequest, request: Request
 
 def _display_name(participant: Participant) -> str:
     return f"{participant.seat}号-{participant.nickname}"
+
+
+def _set_session_cookie(response: Response, room_id: str, session_token: str) -> None:
+    response.set_cookie(
+        key=_session_cookie_name(room_id),
+        value=session_token,
+        max_age=12 * 60 * 60,
+        path="/",
+        samesite="lax",
+    )
+
+
+def _session_cookie_name(room_id: str) -> str:
+    safe_key = re.sub(r"[^A-Za-z0-9_-]", "_", f"avalon_session:{room_id}")[:120]
+    return f"avalon_{safe_key}"

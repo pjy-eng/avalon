@@ -195,7 +195,8 @@ class RoomService:
             payload={"player_ids": self.player_order(room)},
             request_id=request_id,
         )
-        room.events.append(event)
+        room.events = [event]
+        room.seen_request_ids.clear()
         return event
 
     def add_chat_message(self, room_id: str, actor_id: str, text: str, request_id: str | None = None) -> ChatMessage:

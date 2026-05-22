@@ -23,6 +23,26 @@ def join_and_start(gateway: CommandGateway, room_id: str = "ROOM1", count: int =
     return joins
 
 
+def play_successful_mission(gateway: CommandGateway, joins, room_id: str = "ROOM1"):
+    game = current_game(gateway, room_id)
+    leader_join = next(join for join in joins if join.player_id == game.leader_id)
+    team = game.player_order[: game.required_team_size]
+    gateway.handle_command(room_id, leader_join.session_token, {"type": "select_team", "team": team}, "select-team-1")
+    for index, join in enumerate(joins):
+        gateway.handle_command(room_id, join.session_token, {"type": "team_vote", "vote": "Approve"}, f"team-vote-{index}")
+    result = None
+    for index, player_id in enumerate(team):
+        join = next(item for item in joins if item.player_id == player_id)
+        result = gateway.handle_command(
+            room_id,
+            join.session_token,
+            {"type": "mission_vote", "vote": "Success"},
+            f"mission-vote-{index}",
+        )
+    assert result is not None
+    return result
+
+
 def current_game(gateway: CommandGateway, room_id: str = "ROOM1"):
     room = gateway.room_service.get_room(room_id)
     assert room.game is not None
@@ -185,6 +205,31 @@ def test_reset_requires_host_and_returns_room_to_lobby_with_participants_retaine
     ]
     assert result.snapshot["room"]["host_id"] == joins[0].player_id
     assert all(participant["ready"] is False for participant in result.snapshot["participants"])
+
+
+def test_reset_then_restart_does_not_reuse_previous_gameplay_events():
+    gateway = make_gateway()
+    joins = join_and_start(gateway)
+    mission_result = play_successful_mission(gateway, joins)
+
+    assert mission_result.snapshot["phase_summary"]["mission_result"]["score_good"] == 1
+
+    gateway.handle_command(
+        room_id="ROOM1",
+        session_token=joins[0].session_token,
+        command={"type": "reset"},
+        request_id="reset-after-mission",
+    )
+    restarted = gateway.handle_command(
+        room_id="ROOM1",
+        session_token=joins[0].session_token,
+        command={"type": "start_game"},
+        request_id="restart-after-reset",
+    )
+
+    assert restarted.snapshot["phase_summary"]["phase"] == Phase.TEAM_PROPOSAL.value
+    assert "mission_result" not in restarted.snapshot["phase_summary"]
+    assert [item["kind"] for item in restarted.snapshot["public_timeline"]] == ["game_started"]
 
 
 def test_reusing_request_id_for_different_host_command_does_not_execute_reset():

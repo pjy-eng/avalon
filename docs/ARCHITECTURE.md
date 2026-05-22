@@ -127,6 +127,7 @@ static/
 - `GET /`：返回 `static/index.html`。
 - `GET /health`：返回 service、database、redis、voice 状态。
 - `POST /api/rooms/{room_id}/join`：加入房间并签发 session token。
+- `POST /api/rooms/{room_id}/resume`：用本地保存的 session token 恢复同一玩家身份和当前 snapshot。
 - `POST /api/rooms/{room_id}/command`：提交 ready/start/reset、完整游戏动作、聊天和大厅治理命令。
 - `POST /api/rooms/{room_id}/voice-token`：按当前 voice provider 返回 token 或 disabled 状态。
 
@@ -153,7 +154,7 @@ LIVEKIT_API_SECRET
 
 - Postgres repository/event log 代码已存在，适合后续接入生产命令流持久化。
 - Redis store 基础代码已存在，适合后续做房间状态缓存或恢复。
-- LiveKit 三个变量完整时使用 `LiveKitVoiceProvider`；否则使用 `NoopVoiceProvider`。
+- LiveKit 三个变量完整时使用 `LiveKitVoiceProvider`；否则使用 `NoopVoiceProvider`。阶段禁麦会同步 LiveKit permission，踢人/退出会尝试服务端移出 voice participant。
 - `SESSION_SECRET` 未配置时会使用开发默认值，线上必须显式设置。
 
 ## Deferred Items
