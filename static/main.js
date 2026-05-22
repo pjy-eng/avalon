@@ -77,6 +77,9 @@ const SPEAKING_ON_RMS = 14;
 const SPEAKING_OFF_RMS = 6;
 const SPEAKING_OFF_DELAY_MS = 180;
 const SPEAKING_CHECK_MS = 100;
+// v17.4: 关闭“音量检测 -> 座位闪烁”的联动。
+// 多人手机外放时，远端声音会被本机麦克风再次拾取，导致所有座位一起闪。
+const ENABLE_VAD_SEAT_HIGHLIGHT = false;
 const LIVEKIT_SDK_URLS = [
   "https://cdn.jsdelivr.net/npm/livekit-client@2.19.0/+esm",
   "https://esm.sh/livekit-client@2.19.0?bundle"
@@ -414,10 +417,13 @@ function renderPlayers(players, signal, you) {
   const canKick = currentPayload?.state?.permissions?.can_kick;
 
   const playerKey = players.map(p => {
-    const isSpeaking = p.is_speaking || p.id === active || (onlyMicSeat && p.seat === onlyMicSeat);
-    return `${p.id}:${p.name}:${p.connected}:${p.is_host}:${p.is_ready}:${p.id === signal.leader_id}:${isSpeaking}:${teamIds.has(p.id)}:${marks[p.id] || ""}`;
-  }).join("|") + "|" + signal.leader_id + "|" + you.id + "|" + (latestState?.current_phase || "") + "|" + (canKick ? "k" : "");
-  if (playerKey === _lastPlayerKey) return;
+    // v17.4: speaking_ids 不参与整列座位重绘，避免有人说话时所有卡片重新 fade-in。
+    return `${p.id}:${p.name}:${p.connected}:${p.is_host}:${p.is_ready}:${p.id === signal.leader_id}:${teamIds.has(p.id)}:${marks[p.id] || ""}`;
+  }).join("|") + "|" + signal.leader_id + "|" + (active || "") + "|" + you.id + "|" + (latestState?.current_phase || "") + "|" + (canKick ? "k" : "");
+  if (playerKey === _lastPlayerKey) {
+    applySeatSpeakingIndicators(players, signal);
+    return;
+  }
   _lastPlayerKey = playerKey;
 
   if (oddWrap) oddWrap.innerHTML = "";
@@ -434,7 +440,7 @@ function renderPlayers(players, signal, you) {
     }
     const isSelf = p.id === you.id;
     const isLeader = p.id === signal.leader_id && latestState?.current_phase !== "LOBBY";
-    const isSpeaking = p.is_speaking || p.id === active || (onlyMicSeat && p.seat === onlyMicSeat);
+    const isSpeaking = p.id === active || (onlyMicSeat && Number(p.seat) === Number(onlyMicSeat));
     const classes = ["seat-card"];
     if (isSelf) classes.push("self");
     if (isLeader) classes.push("leader");
@@ -468,6 +474,31 @@ function renderPlayers(players, signal, you) {
     });
     target.appendChild(card);
   }
+  applySeatSpeakingIndicators(players, signal);
+}
+
+function applySeatSpeakingIndicators(players, signal) {
+  const active = signal?.active_speaker_id;
+  const onlyMicSeat = onlyMicSeatFromStatus(signal?.mic_status, players);
+  const byId = new Map((players || []).map(p => [p.id, p]));
+  document.querySelectorAll(".seat-card[data-player-id]").forEach(card => {
+    const p = byId.get(card.dataset.playerId);
+    if (!p) return;
+    // v17.4: 只根据法官流程里的当前发言人/仅开麦座位做稳定提示；
+    // 不再使用 p.is_speaking 的实时音量检测，避免手机外放回声让全员闪烁。
+    const isSpeaking = p.id === active || (onlyMicSeat && Number(p.seat) === Number(onlyMicSeat));
+    card.classList.toggle("speaking", !!isSpeaking);
+    const seatTop = card.querySelector(".seat-top");
+    let mic = card.querySelector(".mic-indicator");
+    if (isSpeaking && seatTop && !mic) {
+      mic = document.createElement("div");
+      mic.className = "mic-indicator";
+      mic.textContent = "🎙";
+      seatTop.appendChild(mic);
+    } else if (!isSpeaking && mic) {
+      mic.remove();
+    }
+  });
 }
 
 function renderPrivateInfo(info, revealRoles) {
@@ -1348,7 +1379,7 @@ async function setMicEnabled(on) {
       voiceEnabled = true;
 
       await refreshLiveKitAudioPermission();
-      startSpeakingWatch();
+      if (ENABLE_VAD_SEAT_HIGHLIGHT) startSpeakingWatch();
       updateVoiceButtons();
     } catch (err) {
       console.warn("enable mic failed", err);
@@ -1361,7 +1392,7 @@ async function setMicEnabled(on) {
   micEnabled = false;
   listenOnly = speakerEnabled;
   stopSpeakingWatch();
-  sendSpeakingState(false);
+  if (ENABLE_VAD_SEAT_HIGHLIGHT) sendSpeakingState(false);
 
   if (localAudioTrack) {
     try { await localAudioTrack.mute(); } catch (_) {}
@@ -1585,13 +1616,13 @@ async function refreshLiveKitAudioPermission() {
     }
   }
 
-  if (!allowed) sendSpeakingState(false);
+  if (!allowed && ENABLE_VAD_SEAT_HIGHLIGHT) sendSpeakingState(false);
   updateVoiceButtons();
 }
 
 async function disconnectLiveKit() {
   stopSpeakingWatch();
-  sendSpeakingState(false);
+  if (ENABLE_VAD_SEAT_HIGHLIGHT) sendSpeakingState(false);
 
   if (localAudioTrack) {
     try { await localAudioTrack.mute(); } catch (_) {}
@@ -1675,6 +1706,7 @@ function friendlyAudioError(err) {
 }
 
 function startSpeakingWatch() {
+  if (!ENABLE_VAD_SEAT_HIGHLIGHT) return;
   stopSpeakingWatch(false);
   const mediaTrack = localAudioTrack?.mediaStreamTrack;
   if (!mediaTrack) return;

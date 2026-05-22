@@ -400,7 +400,8 @@ body {
 }
 
 .seat-card.speaking {
-  animation: breathe-blue 2s ease-in-out infinite;
+  border-color: rgba(59,95,214,.65);
+  box-shadow: 0 0 10px rgba(59,95,214,.32);
 }
 
 .seat-card.offline { opacity: .55; }

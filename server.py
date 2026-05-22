@@ -175,6 +175,13 @@ class Room:
 
 rooms: Dict[str, Room] = {}
 redis_client = None
+redis_url_global: Optional[str] = None
+redis_unhealthy_until = 0.0
+redis_last_log_at = 0.0
+redis_reconnect_lock = asyncio.Lock()
+REDIS_RETRY_COOLDOWN_SECONDS = 15
+REDIS_LOG_THROTTLE_SECONDS = 30
+
 
 app = FastAPI(title="Avalon Online AI Judge", version="14.0.0-castle-deal")
 app.add_middleware(
@@ -201,16 +208,37 @@ async def head_index() -> Dict[str, Any]:
 
 @app.on_event("startup")
 async def startup_tasks() -> None:
-    global redis_client
-    redis_url = os.getenv("REDIS_URL")
-    if redis and redis_url:
-        redis_client = redis.from_url(redis_url, decode_responses=True)
+    global redis_client, redis_url_global
+    redis_url_global = os.getenv("REDIS_URL")
+    if redis and redis_url_global:
+        redis_client = make_redis_client(redis_url_global)
+        try:
+            await asyncio.wait_for(redis_client.ping(), timeout=2.0)
+            print("[redis] connected")
+        except Exception as exc:
+            # Keep the app running even if Redis is temporarily unavailable.
+            mark_redis_unhealthy("startup ping", exc)
     asyncio.create_task(room_cleanup_loop())
+
+
+@app.on_event("shutdown")
+async def shutdown_tasks() -> None:
+    if redis_client:
+        with contextlib.suppress(Exception):
+            await redis_client.aclose()
 
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    return {"ok": True, "rooms": len(rooms), "livekit_configured": livekit_configured(), "redis_configured": bool(redis_client)}
+    redis_configured = bool(redis_url_global or os.getenv("REDIS_URL"))
+    redis_healthy = bool(redis_client) and time.time() >= redis_unhealthy_until
+    return {
+        "ok": True,
+        "rooms": len(rooms),
+        "livekit_configured": livekit_configured(),
+        "redis_configured": redis_configured,
+        "redis_healthy": redis_healthy,
+    }
 
 
 @app.head("/health")
@@ -484,6 +512,10 @@ async def handle_message(room: Room, player_id: str, msg: Dict[str, Any]) -> Non
     if msg_type in {"rtc_offer", "rtc_answer", "rtc_ice"}:
         await forward_rtc(room, player_id, msg)
         return
+    # v17.4: speaking_state 是本地音量检测信号，容易被手机外放回声误触发。
+    # 这里不再广播整房间状态，避免一句话造成全员座位重绘/闪烁。
+    if msg_type == "speaking_state":
+        return
     await broadcast_state(room)
 
 
@@ -583,6 +615,60 @@ async def forward_rtc(room: Room, sender_id: str, msg: Dict[str, Any]) -> None:
 
 
 
+def make_redis_client(redis_url: str):
+    # health_check_interval makes redis-py test idle pooled connections before reuse.
+    # This prevents long games from repeatedly hitting a dead Redis socket after
+    # the provider closes an idle TCP connection.
+    return redis.from_url(
+        redis_url,
+        decode_responses=True,
+        socket_keepalive=True,
+        health_check_interval=30,
+        retry_on_timeout=True,
+        socket_connect_timeout=5,
+        socket_timeout=5,
+    )
+
+
+def mark_redis_unhealthy(action: str, exc: Exception) -> None:
+    global redis_unhealthy_until, redis_last_log_at
+    now = time.time()
+    redis_unhealthy_until = max(redis_unhealthy_until, now + REDIS_RETRY_COOLDOWN_SECONDS)
+    if now - redis_last_log_at >= REDIS_LOG_THROTTLE_SECONDS:
+        redis_last_log_at = now
+        print(f"[redis] {action} failed: {exc}; will retry in {REDIS_RETRY_COOLDOWN_SECONDS}s")
+
+
+async def ensure_redis_ready(force_reconnect: bool = False) -> bool:
+    global redis_client, redis_url_global, redis_unhealthy_until
+    if redis is None:
+        return False
+    redis_url_global = redis_url_global or os.getenv("REDIS_URL")
+    if not redis_url_global:
+        return False
+    now = time.time()
+    if redis_client and not force_reconnect and now < redis_unhealthy_until:
+        return False
+    if redis_client and not force_reconnect:
+        return True
+    async with redis_reconnect_lock:
+        if redis_client and not force_reconnect and time.time() >= redis_unhealthy_until:
+            return True
+        old_client = redis_client
+        redis_client = make_redis_client(redis_url_global)
+        if old_client:
+            with contextlib.suppress(Exception):
+                await old_client.aclose()
+        try:
+            await asyncio.wait_for(redis_client.ping(), timeout=2.0)
+            redis_unhealthy_until = 0.0
+            print("[redis] reconnected")
+            return True
+        except Exception as exc:
+            mark_redis_unhealthy("reconnect", exc)
+            return False
+
+
 def redis_key(room_id: str) -> str:
     return f"avalon:room:{room_id}"
 
@@ -629,46 +715,51 @@ def deserialize_room(data: Dict[str, Any]) -> Room:
 
 
 async def load_room_from_redis(room_id: str) -> Optional[Room]:
-    if not redis_client:
+    if not await ensure_redis_ready():
         return None
-    try:
-        raw = await redis_client.get(redis_key(room_id))
-        if not raw:
+    key = redis_key(room_id)
+    for attempt in range(2):
+        try:
+            raw = await asyncio.wait_for(redis_client.get(key), timeout=2.0)
+            if not raw:
+                return None
+            data = json.loads(raw)
+            room = deserialize_room(data)
+            rooms[room_id] = room
+            return room
+        except Exception as exc:
+            if attempt == 0 and await ensure_redis_ready(force_reconnect=True):
+                continue
+            mark_redis_unhealthy(f"load room {room_id}", exc)
             return None
-        data = json.loads(raw)
-        room = deserialize_room(data)
-        rooms[room_id] = room
-        return room
-    except Exception as exc:
-        print(f"[redis] load room {room_id} failed: {exc}")
-        return None
+    return None
 
 
 async def save_room(room: Room) -> None:
-    """Persist room to Redis. Always called after state mutations.
-
-    Fire-and-forget pattern: errors are logged but never propagate to
-    the WebSocket handler so a Redis hiccup cannot crash an in-progress game.
-    """
-    if not redis_client:
+    """Persist room to Redis without letting Redis hiccups break WebSocket play."""
+    if not await ensure_redis_ready():
         return
-    try:
-        payload = json.dumps(serialize_room(room), ensure_ascii=False)
-        await asyncio.wait_for(
-            redis_client.setex(redis_key(room.room_id), ROOM_PERSIST_TTL_SECONDS, payload),
-            timeout=2.0,
-        )
-    except asyncio.TimeoutError:
-        print(f"[redis] save room {room.room_id} timed out, skipping")
-    except Exception as exc:
-        print(f"[redis] save room {room.room_id} failed: {exc}")
+    payload = json.dumps(serialize_room(room), ensure_ascii=False)
+    key = redis_key(room.room_id)
+    for attempt in range(2):
+        try:
+            await asyncio.wait_for(
+                redis_client.setex(key, ROOM_PERSIST_TTL_SECONDS, payload),
+                timeout=2.0,
+            )
+            return
+        except Exception as exc:
+            if attempt == 0 and await ensure_redis_ready(force_reconnect=True):
+                continue
+            mark_redis_unhealthy(f"save room {room.room_id}", exc)
+            return
 
 
 async def delete_room_from_redis(room_id: str) -> None:
-    if not redis_client:
+    if not await ensure_redis_ready():
         return
     with contextlib.suppress(Exception):
-        await redis_client.delete(redis_key(room_id))
+        await asyncio.wait_for(redis_client.delete(redis_key(room_id)), timeout=2.0)
 
 
 async def get_room(room_id: str, create: bool = False) -> Optional[Room]:
