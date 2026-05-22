@@ -29,7 +29,7 @@
 
 - UI 入口：`TEAM_PROPOSAL` 阶段的“选择出征队伍”按钮。
 - 历史状态：按钮曾灰置；服务端快照能告诉当前玩家是否为队长，领域模型已有 `AvalonGame.select_team()`。
-- 缺失项：
+- 当时缺失项/已补齐范围：
   - `CommandGateway` 支持 `select_team` 命令。
   - HTTP / WebSocket 命令请求校验 `team` 参数。
   - 提交后广播进入 `TEAM_VOTE` 的私有快照。
@@ -39,7 +39,7 @@
 
 - UI 入口：`TEAM_VOTE` 阶段的“赞成 / 反对”按钮。
 - 历史状态：按钮曾灰置；领域模型已有 `AvalonGame.submit_team_vote()`。
-- 缺失项：
+- 当时缺失项/已补齐范围：
   - `CommandGateway` 支持 `team_vote` 命令。
   - 防重复提交和阶段校验的应用层测试。
   - 投票完成后广播进入 `MISSION_VOTE` 或回到 `TEAM_PROPOSAL`。
@@ -49,7 +49,7 @@
 
 - UI 入口：`MISSION_VOTE` 阶段的“任务成功 / 任务失败”按钮。
 - 历史状态：按钮曾灰置；领域模型已有 `AvalonGame.submit_mission_vote()`。
-- 缺失项：
+- 当时缺失项/已补齐范围：
   - `CommandGateway` 支持 `mission_vote` 命令。
   - 只有当前队伍成员可提交任务票。
   - 好人阵营是否允许提交失败票需要规则层明确。当时 `friend_flexible` 快照只表达 `can_submit_fail`，但应用层尚未执行。
@@ -59,7 +59,7 @@
 
 - UI 入口：`MISSION_RESULT_DISCUSSION` 阶段的“进入下一轮”按钮。
 - 历史状态：按钮曾灰置；领域模型已有 `AvalonGame.continue_after_mission_result()`。
-- 缺失项：
+- 当时缺失项/已补齐范围：
   - `CommandGateway` 支持 `continue_after_result` 命令。
   - 明确谁可以推进：建议第一版由房主推进，后续可改为讨论计时或发言轮结束自动推进。
   - 推进后重置当前队伍、票、队长，并广播下一轮 `TEAM_PROPOSAL`。
@@ -68,7 +68,7 @@
 
 - UI 入口：`ASSASSINATION` 阶段的“选择刺杀目标”按钮。
 - 历史状态：按钮曾灰置；领域模型已有 `AvalonGame.submit_assassination()`。
-- 缺失项：
+- 当时缺失项/已补齐范围：
   - `CommandGateway` 支持 `assassinate` 命令。
   - 前端刺杀目标弹层启用。
   - 只有刺客可提交，且只能提交一次。
@@ -78,7 +78,7 @@
 
 - UI 入口：历史弹层、法官公告、任务结果复盘文案。
 - 历史状态：页面已保留历史入口，但 `public_timeline` 仍为空。
-- 缺失项：
+- 当时缺失项/已补齐范围：
   - 应用层事件投影公开历史：开局、队长、队伍名单、组队是否通过、任务成功/失败、失败票数量、比分、刺杀结果。
   - 历史不得泄漏秘密任务票提交者、未公开身份表或夜间可见信息。
   - 快照需要稳定返回 `public_timeline`。
@@ -87,7 +87,7 @@
 
 - UI 入口：终局阶段、信息弹层、历史弹层。
 - 历史状态：`GAME_OVER` 只显示胜利方，未公开全员身份。
-- 缺失项：
+- 当时缺失项/已补齐范围：
   - 快照新增终局 `reveal_roles`，仅在 `GAME_OVER` 返回。
   - 前端终局展示所有玩家身份与阵营。
   - 测试确保非终局不泄漏全员身份。

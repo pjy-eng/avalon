@@ -90,7 +90,7 @@ app/realtime/
   manager.py    WebSocket connection registration and per-room broadcast.
 
 static/
-  First-phase browser UI for structured snapshots.
+  Snapshot-driven roundtable browser UI for gameplay, chat, voice controls, and local marks.
 ```
 
 ## Authoritative State

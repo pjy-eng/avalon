@@ -122,7 +122,7 @@ app/application/           sessions、rooms、commands、snapshots、events
 app/infrastructure/        db、repositories、redis_store、voice
 app/api/                   HTTP 与 WebSocket 路由
 app/realtime/              WebSocket ConnectionManager
-static/                    第一阶段结构化 snapshot UI
+static/                    朋友局圆桌 UI，基于服务端 snapshot 渲染
 tests/                     后端规则和服务测试
 docs/                      架构、部署、版本说明
 render.yaml                Render 部署配置
