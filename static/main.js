@@ -77,9 +77,9 @@ const SPEAKING_ON_RMS = 14;
 const SPEAKING_OFF_RMS = 6;
 const SPEAKING_OFF_DELAY_MS = 180;
 const SPEAKING_CHECK_MS = 100;
-// v17.4: 关闭“音量检测 -> 座位闪烁”的联动。
-// 多人手机外放时，远端声音会被本机麦克风再次拾取，导致所有座位一起闪。
-const ENABLE_VAD_SEAT_HIGHLIGHT = false;
+// v17.5: 开启按 playerId 上报的本地语音活动。
+// 前端只根据具体 playerId 更新对应座位，不能用全局 speaking 布尔值控制所有座位。
+const ENABLE_VAD_SEAT_HIGHLIGHT = true;
 const LIVEKIT_SDK_URLS = [
   "https://cdn.jsdelivr.net/npm/livekit-client@2.19.0/+esm",
   "https://esm.sh/livekit-client@2.19.0?bundle"
@@ -196,6 +196,10 @@ function connectWebSocket() {
     localStorage.setItem("avalon_player_name", myName);
     localStorage.setItem("avalon_last_room", roomId);
     nextWs.send(JSON.stringify({ type: "join", player_id: myId, name: myName, resume: true }));
+    if (micEnabled) setTimeout(() => {
+      sendMicState(true);
+      lastSpeakingState = false;
+    }, 250);
     history.replaceState({}, "", `/?room=${encodeURIComponent(roomId)}`);
     $("joinView").classList.add("hidden");
     $("gameView").classList.remove("hidden");
@@ -273,6 +277,10 @@ function handleSocketMessage(msg) {
     currentPayload = msg;
     render(msg);
     if (voiceEnabled) refreshLiveKitAudioPermission();
+    return;
+  }
+  if (msg.type === "voice_activity") {
+    syncVoiceActivity(msg);
     return;
   }
   if (msg.type === "error") {
@@ -412,13 +420,12 @@ function renderPlayers(players, signal, you) {
   const marks = getPrivateMarks();
   const active = signal.active_speaker_id;
   const teamIds = new Set(signal.current_team_ids || []);
-  const onlyMicSeat = onlyMicSeatFromStatus(signal.mic_status, players);
   const bySeat = new Map(players.map(p => [Number(p.seat), p]));
   const canKick = currentPayload?.state?.permissions?.can_kick;
 
   const playerKey = players.map(p => {
-    // v17.4: speaking_ids 不参与整列座位重绘，避免有人说话时所有卡片重新 fade-in。
-    return `${p.id}:${p.name}:${p.connected}:${p.is_host}:${p.is_ready}:${p.id === signal.leader_id}:${teamIds.has(p.id)}:${marks[p.id] || ""}`;
+    // v17.5: speaking 不参与整列座位重绘；mic_enabled 参与，方便显示每个玩家的麦克风状态。
+    return `${p.id}:${p.name}:${p.connected}:${p.is_host}:${p.is_ready}:${!!p.mic_enabled}:${p.id === signal.leader_id}:${teamIds.has(p.id)}:${marks[p.id] || ""}`;
   }).join("|") + "|" + signal.leader_id + "|" + (active || "") + "|" + you.id + "|" + (latestState?.current_phase || "") + "|" + (canKick ? "k" : "");
   if (playerKey === _lastPlayerKey) {
     applySeatSpeakingIndicators(players, signal);
@@ -440,7 +447,8 @@ function renderPlayers(players, signal, you) {
     }
     const isSelf = p.id === you.id;
     const isLeader = p.id === signal.leader_id && latestState?.current_phase !== "LOBBY";
-    const isSpeaking = p.id === active || (onlyMicSeat && Number(p.seat) === Number(onlyMicSeat));
+    const voiceStatus = getPlayerVoiceStatus(p, signal);
+    const isSpeaking = voiceStatus.speaking;
     const classes = ["seat-card"];
     if (isSelf) classes.push("self");
     if (isLeader) classes.push("leader");
@@ -461,7 +469,7 @@ function renderPlayers(players, signal, you) {
     if (p.id === active) tags.push(`<span class="tag self">发言中</span>`);
     if (!p.connected) tags.push(`<span class="tag offline">离线</span>`);
     const canKick = currentPayload?.state?.permissions?.can_kick && p.id !== you.id;
-    card.innerHTML = `<div class="seat-top"><div class="seat-num">${seat}</div>${isSpeaking ? `<div class="mic-indicator">🎙</div>` : ""}</div><div class="seat-main"><div class="seat-name">${escapeHtml(p.name || "玩家")}</div><div class="seat-tags">${tags.join("")}${canKick ? `<button class="kick-btn" data-kick="${escapeHtml(p.id)}">踢</button>` : ""}</div></div>`;
+    card.innerHTML = `<div class="seat-top"><div class="seat-num">${seat}</div>${seatMicMarkup(voiceStatus)}</div><div class="seat-main"><div class="seat-name">${escapeHtml(p.name || "玩家")}</div><div class="seat-tags">${tags.join("")}${canKick ? `<button class="kick-btn" data-kick="${escapeHtml(p.id)}">踢</button>` : ""}</div></div>`;
     card.addEventListener("click", (e) => {
       if (e.target?.dataset?.kick) return;
       if (isSelf) openIdentityOverlay();
@@ -478,27 +486,86 @@ function renderPlayers(players, signal, you) {
 }
 
 function applySeatSpeakingIndicators(players, signal) {
-  const active = signal?.active_speaker_id;
-  const onlyMicSeat = onlyMicSeatFromStatus(signal?.mic_status, players);
   const byId = new Map((players || []).map(p => [p.id, p]));
   document.querySelectorAll(".seat-card[data-player-id]").forEach(card => {
     const p = byId.get(card.dataset.playerId);
     if (!p) return;
-    // v17.4: 只根据法官流程里的当前发言人/仅开麦座位做稳定提示；
-    // 不再使用 p.is_speaking 的实时音量检测，避免手机外放回声让全员闪烁。
-    const isSpeaking = p.id === active || (onlyMicSeat && Number(p.seat) === Number(onlyMicSeat));
-    card.classList.toggle("speaking", !!isSpeaking);
-    const seatTop = card.querySelector(".seat-top");
-    let mic = card.querySelector(".mic-indicator");
-    if (isSpeaking && seatTop && !mic) {
-      mic = document.createElement("div");
-      mic.className = "mic-indicator";
-      mic.textContent = "🎙";
-      seatTop.appendChild(mic);
-    } else if (!isSpeaking && mic) {
-      mic.remove();
-    }
+    const voiceStatus = getPlayerVoiceStatus(p, signal);
+    card.classList.toggle("speaking", !!voiceStatus.speaking);
+    card.classList.toggle("mic-open", voiceStatus.state === "on" || voiceStatus.state === "speaking");
+    card.classList.toggle("mic-muted", voiceStatus.state === "muted" || voiceStatus.state === "off");
+    updateSeatMicIndicator(card, voiceStatus);
   });
+}
+
+function syncVoiceActivity(msg) {
+  if (!currentPayload?.state?.players) return;
+  const speakingIds = new Set(msg.speaking_ids || []);
+  const micIds = new Set(msg.mic_enabled_ids || []);
+  currentPayload.state.players.forEach(p => {
+    p.is_speaking = speakingIds.has(p.id);
+    p.mic_enabled = micIds.has(p.id);
+  });
+  if (currentPayload.state.control_signal) {
+    currentPayload.state.control_signal.speaking_ids = Array.from(speakingIds);
+    currentPayload.state.control_signal.mic_enabled_ids = Array.from(micIds);
+  }
+  applySeatSpeakingIndicators(currentPayload.state.players, currentPayload.state.control_signal || {});
+}
+
+function getPlayerVoiceStatus(p, signal={}) {
+  const connected = p?.connected !== false;
+  if (!connected) return { state: "offline", speaking: false, icon: "", title: "玩家离线，语音状态隐藏" };
+
+  const micIds = new Set(signal?.mic_enabled_ids || []);
+  const speakingIds = new Set(signal?.speaking_ids || []);
+  const micOn = p.id === myId ? !!micEnabled : (!!p.mic_enabled || micIds.has(p.id));
+  const allowed = isPlayerMicAllowed(p, signal);
+  const speaking = !!(micOn && allowed && (p.is_speaking || speakingIds.has(p.id)));
+
+  if (speaking) return { state: "speaking", speaking: true, icon: "🎙", title: "正在说话" };
+  if (micOn && allowed) return { state: "on", speaking: false, icon: "🎙", title: "麦克风已开启" };
+  if (micOn && !allowed) return { state: "muted", speaking: false, icon: "🔇", title: "已开麦，但当前流程禁麦" };
+  return { state: "off", speaking: false, icon: "🔇", title: "麦克风关闭或未加入语音" };
+}
+
+function isPlayerMicAllowed(p, signal={}) {
+  const status = String(signal?.mic_status || "UNMUTE_ALL");
+  if (status === "UNMUTE_ALL") return true;
+  if (status === "MUTE_ALL") return false;
+  const seat = onlyMicSeatFromStatus(status, [p]);
+  if (seat) return Number(p?.seat) === Number(seat);
+  const idMatch = status.match(/^MUTE_ALL_EXCEPT_(.+)$/);
+  if (idMatch) return p?.id === idMatch[1];
+  return true;
+}
+
+function seatMicMarkup(status) {
+  if (!status || status.state === "offline") return "";
+  const title = escapeHtml(status.title || "麦克风状态");
+  return `<div class="mic-indicator mic-${status.state}" title="${title}" aria-label="${title}">${status.icon}</div>`;
+}
+
+function updateSeatMicIndicator(card, status) {
+  const seatTop = card.querySelector(".seat-top");
+  if (!seatTop) return;
+  let mic = card.querySelector(".mic-indicator");
+
+  if (!status || status.state === "offline") {
+    if (mic) mic.remove();
+    return;
+  }
+
+  if (!mic) {
+    mic = document.createElement("div");
+    mic.className = "mic-indicator";
+    seatTop.appendChild(mic);
+  }
+
+  mic.className = `mic-indicator mic-${status.state}`;
+  mic.textContent = status.icon;
+  mic.title = status.title || "麦克风状态";
+  mic.setAttribute("aria-label", mic.title);
 }
 
 function renderPrivateInfo(info, revealRoles) {
@@ -1379,8 +1446,11 @@ async function setMicEnabled(on) {
       voiceEnabled = true;
 
       await refreshLiveKitAudioPermission();
+      sendMicState(true);
+      lastSpeakingState = false;
       if (ENABLE_VAD_SEAT_HIGHLIGHT) startSpeakingWatch();
       updateVoiceButtons();
+      applySeatSpeakingIndicators(currentPayload?.state?.players || [], currentPayload?.state?.control_signal || {});
     } catch (err) {
       console.warn("enable mic failed", err);
       showTopError(`无法启用语音：${friendlyAudioError(err)}`);
@@ -1393,6 +1463,7 @@ async function setMicEnabled(on) {
   listenOnly = speakerEnabled;
   stopSpeakingWatch();
   if (ENABLE_VAD_SEAT_HIGHLIGHT) sendSpeakingState(false);
+  sendMicState(false);
 
   if (localAudioTrack) {
     try { await localAudioTrack.mute(); } catch (_) {}
@@ -1406,6 +1477,7 @@ async function setMicEnabled(on) {
 
   voiceEnabled = !!livekitRoom;
   updateVoiceButtons();
+  applySeatSpeakingIndicators(currentPayload?.state?.players || [], currentPayload?.state?.control_signal || {});
 }
 
 async function setSpeakerEnabled(on) {
@@ -1690,6 +1762,7 @@ async function unlockAudioPlayback() {
 }
 
 function disableVoice(updateButtons=true) {
+  sendMicState(false);
   micEnabled = false;
   speakerEnabled = false;
   listenOnly = false;
@@ -1781,8 +1854,14 @@ function stopSpeakingWatch(sendStop=true) {
   if (sendStop) sendSpeakingState(false);
 }
 
+function sendMicState(enabled=micEnabled) {
+  send({ type: "mic_state", mic_enabled: !!enabled });
+}
+
 function sendSpeakingState(speaking) {
-  if (lastSpeakingState === speaking) return;
-  lastSpeakingState = speaking;
-  send({ type: "speaking_state", speaking });
+  const allowed = !!currentPayload?.state?.control_signal?.personal_audio_allowed;
+  const nextSpeaking = !!(speaking && micEnabled && allowed);
+  if (lastSpeakingState === nextSpeaking) return;
+  lastSpeakingState = nextSpeaking;
+  send({ type: "speaking_state", speaking: nextSpeaking });
 }

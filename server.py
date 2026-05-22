@@ -52,6 +52,7 @@ class Room:
     game: Optional[AvalonGame] = None
     chat_history: List[Dict[str, Any]] = field(default_factory=list)
     speaking_ids: Set[str] = field(default_factory=set)
+    mic_enabled_ids: Set[str] = field(default_factory=set)
     ready_ids: Set[str] = field(default_factory=set)
     last_seen: Dict[str, float] = field(default_factory=dict)
     disconnected_at: Dict[str, float] = field(default_factory=dict)
@@ -78,6 +79,7 @@ class Room:
                 "connected": self.players[pid].connected,
                 "is_host": pid == self.host_id,
                 "is_speaking": pid in self.speaking_ids,
+                "mic_enabled": pid in self.mic_enabled_ids,
                 "is_ready": pid in self.ready_ids or pid == self.host_id,
             }
             for pid in order
@@ -115,6 +117,7 @@ class Room:
                 "public_result": None,
                 "personal_audio_allowed": True,
                 "speaking_ids": list(self.speaking_ids),
+                "mic_enabled_ids": list(self.mic_enabled_ids),
                 "ready_count": ready_count,
                 "ready_required": ready_required,
                 "all_ready": all_ready,
@@ -155,6 +158,7 @@ class Room:
                 host_id=self.host_id,
             )
             state["control_signal"]["speaking_ids"] = list(self.speaking_ids)
+            state["control_signal"]["mic_enabled_ids"] = list(self.mic_enabled_ids)
             state["game_seq"] = self.game_seq
             # 房主保留重置权；本轮队长拥有游戏内主持权。
             state["permissions"]["can_kick"] = False
@@ -397,6 +401,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str) -> None:
                 if room.sockets.get(player_id) is websocket:
                     room.sockets.pop(player_id, None)
                 room.speaking_ids.discard(player_id)
+                room.mic_enabled_ids.discard(player_id)
                 if player_id in room.players:
                     room.players[player_id].connected = False
                     room.disconnected_at[player_id] = time.time()
@@ -476,13 +481,21 @@ async def handle_message(room: Room, player_id: str, msg: Dict[str, Any]) -> Non
             elif msg_type == "ping":
                 pass
             elif msg_type == "speaking_state":
-                if bool(msg.get("speaking")):
+                mic_on = player_id in room.mic_enabled_ids
+                if bool(msg.get("speaking")) and mic_on:
                     room.speaking_ids.add(player_id)
                 else:
                     room.speaking_ids.discard(player_id)
+            elif msg_type == "mic_state":
+                if bool(msg.get("mic_enabled")):
+                    room.mic_enabled_ids.add(player_id)
+                else:
+                    room.mic_enabled_ids.discard(player_id)
+                    room.speaking_ids.discard(player_id)
             elif msg_type == "voice_ready":
-                # 某个玩家刚打开语音/仅扬声器，广播状态让已在线玩家立即补建 WebRTC 连接。
-                pass
+                # 兼容旧前端：玩家打开语音时可刷新一次状态。
+                if bool(msg.get("mic_enabled")):
+                    room.mic_enabled_ids.add(player_id)
             elif msg_type == "kick_player":
                 kicked_ws = kick_player(room, player_id, sanitize_id(msg.get("target") or ""))
             elif msg_type in {"rtc_offer", "rtc_answer", "rtc_ice"}:
@@ -495,6 +508,7 @@ async def handle_message(room: Room, player_id: str, msg: Dict[str, Any]) -> Non
                 room.chat_history = []
                 room.ready_ids.clear()
                 room.speaking_ids.clear()
+                room.mic_enabled_ids.clear()
                 add_system_chat(room, "房间已重置，玩家可以重新开局。")
             else:
                 raise ValueError("未知事件类型。")
@@ -512,9 +526,9 @@ async def handle_message(room: Room, player_id: str, msg: Dict[str, Any]) -> Non
     if msg_type in {"rtc_offer", "rtc_answer", "rtc_ice"}:
         await forward_rtc(room, player_id, msg)
         return
-    # v17.4: speaking_state 是本地音量检测信号，容易被手机外放回声误触发。
-    # 这里不再广播整房间状态，避免一句话造成全员座位重绘/闪烁。
+    # v17.5: speaking_state 只广播轻量语音活动事件，不触发整列座位重绘。
     if msg_type == "speaking_state":
+        await broadcast_voice_activity(room)
         return
     await broadcast_state(room)
 
@@ -532,6 +546,7 @@ def kick_player(room: Room, actor_id: str, target_id: str) -> Optional[WebSocket
     ws = room.sockets.pop(target_id, None)
     room.players.pop(target_id, None)
     room.speaking_ids.discard(target_id)
+    room.mic_enabled_ids.discard(target_id)
     room.ready_ids.discard(target_id)
     # 重新压缩座位，保证显示仍为 1号、2号、3号……
     for idx, pid in enumerate(room.player_order(), start=1):
@@ -591,12 +606,38 @@ async def broadcast_state(room: Room) -> None:
             for pid in dead:
                 room.sockets.pop(pid, None)
                 room.speaking_ids.discard(pid)
+                room.mic_enabled_ids.discard(pid)
                 if pid in room.players:
                     room.players[pid].connected = False
                     room.disconnected_at[pid] = time.time()
             if not room.sockets:
                 room.expire_at = time.time() + ROOM_TTL_SECONDS
         await save_room(room)
+
+
+async def broadcast_voice_activity(room: Room) -> None:
+    """Broadcast only voice activity so clients can update seat CSS without full re-render."""
+    payload = {
+        "type": "voice_activity",
+        "speaking_ids": list(room.speaking_ids),
+        "mic_enabled_ids": list(room.mic_enabled_ids),
+    }
+    dead: List[str] = []
+    for pid, ws in list(room.sockets.items()):
+        ok = await safe_send_json(ws, payload)
+        if not ok:
+            dead.append(pid)
+    if dead:
+        async with room.lock:
+            for pid in dead:
+                room.sockets.pop(pid, None)
+                room.speaking_ids.discard(pid)
+                room.mic_enabled_ids.discard(pid)
+                if pid in room.players:
+                    room.players[pid].connected = False
+                    room.disconnected_at[pid] = time.time()
+            if not room.sockets:
+                room.expire_at = time.time() + ROOM_TTL_SECONDS
 
 
 async def forward_rtc(room: Room, sender_id: str, msg: Dict[str, Any]) -> None:
@@ -799,6 +840,7 @@ async def room_cleanup_loop() -> None:
                         room.sockets.pop(pid, None)
                         room.ready_ids.discard(pid)
                         room.speaking_ids.discard(pid)
+                        room.mic_enabled_ids.discard(pid)
                         room.disconnected_at.pop(pid, None)
                         room.last_seen.pop(pid, None)
                     if evict:
