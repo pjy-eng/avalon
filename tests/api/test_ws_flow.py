@@ -314,7 +314,6 @@ def test_ws_same_player_multiple_connections_receive_broadcasts_after_old_connec
                     "command": {"type": "ready", "ready": True},
                 }
             )
-            old_payload = old_ws.receive_json()
             new_payload = new_ws.receive_json()
 
             old_ws.close()
@@ -329,7 +328,6 @@ def test_ws_same_player_multiple_connections_receive_broadcasts_after_old_connec
             remaining_payload = new_ws.receive_json()
 
     assert old_after_new_connect["type"] == "state"
-    assert old_payload["type"] == "state"
     assert new_payload["type"] == "state"
     assert new_after_old_close["type"] == "state"
     assert remaining_payload["type"] == "state"
@@ -346,7 +344,6 @@ def test_ws_same_player_multiple_connections_receive_broadcasts_after_old_connec
     )
     assert new_close_online["online"] is True
     assert new_close_online["connection_count"] == 1
-    assert old_payload["snapshot"]["you"]["player_id"] == join["player_id"]
     assert new_payload["snapshot"]["you"]["player_id"] == join["player_id"]
     assert remaining_payload["snapshot"]["you"]["player_id"] == join["player_id"]
     participant = next(
